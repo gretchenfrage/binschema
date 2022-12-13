@@ -137,17 +137,14 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 
-    pub fn start_some(mut self) -> Result<Encoder<'a, W, OptionContextLayer<'a, EncoderState<'a, O>>>> {
+    pub fn start_some(mut self) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
         match self.state.schema {
             &Schema::Option(ref inner_schema) => {
                 self.write.write_all(&[1])?;
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: OptionContextLayer {
-                            inner_schema,
-                            outer: self.state,
-                        },
+                        outer: self.state,
                     },
                     write: self.write,
                 })
@@ -230,7 +227,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         mut self,
         variant_ord: usize,
         variant_name: &str,
-    ) -> Result<Encoder<'a, W, EnumContextLayer<'a, EncoderState<'a, O>>>> {
+    ) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
         match self.state.schema {
             &Schema::Enum(ref variants) => {
                 ensure!(
@@ -253,10 +250,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: EnumContextLayer {
-                            variants,
-                            outer: self.state,
-                        },
+                        outer: self.state,
                     },
                     write: self.write,
                 })
@@ -266,23 +260,6 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                 need,
             )),
         }
-    }
-}
-
-pub struct OptionContextLayer<'a, O> {
-    inner_schema: &'a Schema,
-    outer: O,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for OptionContextLayer<'a, O> {
-    type Encoder = <O as Outer<'a, W>>::Encoder;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        self.outer.encoder(write)
-    }
-
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
-        self.outer.recurse_schema(n)
     }
 }
 
@@ -456,22 +433,5 @@ impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
             &self.state.fields[self.state.count..],
         );
         Ok(self.state.outer.encoder(self.write))
-    }
-}
-
-pub struct EnumContextLayer<'a, O> {
-    variants: &'a [EnumSchemaVariant],
-    outer: O,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EnumContextLayer<'a, O> {
-    type Encoder = <O as Outer<'a, W>>::Encoder;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        self.outer.encoder(write)
-    }
-
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
-        self.outer.recurse_schema(n)
     }
 }
