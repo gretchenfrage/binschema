@@ -25,10 +25,12 @@ macro_rules! ensure {
 }
 
 
-pub trait Outer<W> {
+pub trait Outer<'a, W> {
     type Encoder;
 
     fn encoder(self, write: W) -> Self::Encoder;
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema>;
 }
 
 
@@ -37,13 +39,20 @@ pub struct EncoderState<'a, O> {
     outer: O,
 }
 
-impl<'a, W, O> Outer<W> for EncoderState<'a, O> {
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EncoderState<'a, O> {
     type Encoder = Encoder<'a, W, O>;
 
     fn encoder(self, write: W) -> Self::Encoder {
         Encoder {
             state: self,
             write,
+        }
+    }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        match n {
+            0 => Some(self.schema),
+            n => self.outer.recurse_schema(n - 1),
         }
     }
 }
@@ -63,7 +72,7 @@ macro_rules! encode_le_bytes {
     )*};
 }
 
-impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
+impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     fn validate(&self, got: Schema) -> Result<()> {
         ensure!(
             self.state.schema == &got,
@@ -265,11 +274,15 @@ pub struct OptionContextLayer<'a, O> {
     outer: O,
 }
 
-impl<'a, W, O: Outer<W>> Outer<W> for OptionContextLayer<'a, O> {
-    type Encoder = <O as Outer<W>>::Encoder;
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for OptionContextLayer<'a, O> {
+    type Encoder = <O as Outer<'a, W>>::Encoder;
 
     fn encoder(self, write: W) -> Self::Encoder {
         self.outer.encoder(write)
+    }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        self.outer.recurse_schema(n)
     }
 }
 
@@ -280,7 +293,7 @@ pub struct SeqEncoderState<'a, O> {
     count: usize,
 }
 
-impl<'a, W, O> Outer<W> for SeqEncoderState<'a, O> {
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for SeqEncoderState<'a, O> {
     type Encoder = SeqEncoder<'a, W, O>;
 
     fn encoder(self, write: W) -> Self::Encoder {
@@ -289,6 +302,10 @@ impl<'a, W, O> Outer<W> for SeqEncoderState<'a, O> {
             write,
         }
     }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        self.outer.recurse_schema(n)
+    }
 }
 
 pub struct SeqEncoder<'a, W, O> {
@@ -296,7 +313,7 @@ pub struct SeqEncoder<'a, W, O> {
     write: W,
 }
 
-impl<'a, W: Write, O: Outer<W>> SeqEncoder<'a, W, O> {
+impl<'a, W: Write, O: Outer<'a, W>> SeqEncoder<'a, W, O> {
     pub fn start_elem(mut self) -> Result<Encoder<'a, W, SeqEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.len,
@@ -331,7 +348,7 @@ pub struct TupleEncoderState<'a, O> {
     count: usize,
 }
 
-impl<'a, W, O> Outer<W> for TupleEncoderState<'a, O> {
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for TupleEncoderState<'a, O> {
     type Encoder = TupleEncoder<'a, W, O>;
 
     fn encoder(self, write: W) -> Self::Encoder {
@@ -340,6 +357,10 @@ impl<'a, W, O> Outer<W> for TupleEncoderState<'a, O> {
             write,
         }
     }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        self.outer.recurse_schema(n)
+    }
 }
 
 pub struct TupleEncoder<'a, W, O> {
@@ -347,7 +368,7 @@ pub struct TupleEncoder<'a, W, O> {
     write: W,
 }
 
-impl<'a, W: Write, O: Outer<W>> TupleEncoder<'a, W, O> {
+impl<'a, W: Write, O: Outer<'a, W>> TupleEncoder<'a, W, O> {
     pub fn start_elem(mut self) -> Result<Encoder<'a, W, TupleEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.inner_schemas.len(),
@@ -381,7 +402,7 @@ pub struct StructEncoderState<'a, O> {
     count: usize,
 }
 
-impl<'a, W, O> Outer<W> for StructEncoderState<'a, O> {
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for StructEncoderState<'a, O> {
     type Encoder = StructEncoder<'a, W, O>;
 
     fn encoder(self, write: W) -> Self::Encoder {
@@ -390,6 +411,10 @@ impl<'a, W, O> Outer<W> for StructEncoderState<'a, O> {
             write,
         }
     }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        self.outer.recurse_schema(n)
+    }
 }
 
 pub struct StructEncoder<'a, W, O> {
@@ -397,7 +422,7 @@ pub struct StructEncoder<'a, W, O> {
     write: W,
 }
 
-impl<'a, W: Write, O: Outer<W>> StructEncoder<'a, W, O> {
+impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
     pub fn start_field(mut self, name: &str) -> Result<Encoder<'a, W, StructEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.fields.len(),
@@ -439,10 +464,14 @@ pub struct EnumContextLayer<'a, O> {
     outer: O,
 }
 
-impl<'a, W, O: Outer<W>> Outer<W> for EnumContextLayer<'a, O> {
-    type Encoder = <O as Outer<W>>::Encoder;
+impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EnumContextLayer<'a, O> {
+    type Encoder = <O as Outer<'a, W>>::Encoder;
 
     fn encoder(self, write: W) -> Self::Encoder {
         self.outer.encoder(write)
+    }
+
+    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+        self.outer.recurse_schema(n)
     }
 }
