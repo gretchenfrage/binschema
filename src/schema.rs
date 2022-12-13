@@ -49,7 +49,7 @@ pub enum Schema {
     /// Tagged union of variants with both names and ordinals.
     ///
     /// Encoded as:
-    /// - ordinal of variant
+    /// - u64 ordinal of variant
     /// - inner data
     Enum(Vec<EnumSchemaVariant>),
     /// Recurse type. This allows schema to be self-referential.

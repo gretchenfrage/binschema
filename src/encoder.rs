@@ -199,6 +199,48 @@ impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
             )),
         }
     }
+
+    pub fn start_enum(
+        mut self,
+        variant_ord: usize,
+        variant_name: &str,
+    ) -> Result<Encoder<'a, W, EnumContextLayer<'a, EncoderState<'a, O>>>> {
+        match self.state.schema {
+            &Schema::Enum(ref variants) => {
+                ensure!(
+                    variant_ord < variants.len(),
+                    "schema non-comformance, only {} variants, but got variant ordinal {}",
+                    variants.len(),
+                    variant_ord,
+                );
+                let &EnumSchemaVariant {
+                    name: ref need_name,
+                    inner: ref inner_schema,
+                } = &variants[variant_ord];
+                ensure!(
+                    variant_name == need_name,
+                    "schema non-comformance, variant is named {:?}, but got name {:?}",
+                    need_name,
+                    variant_name,
+                );
+                self.write.write_all(&(variant_ord as u64).to_le_bytes())?;
+                Ok(Encoder {
+                    state: EncoderState {
+                        schema: inner_schema,
+                        outer: EnumContextLayer {
+                            variants,
+                            outer: self.state,
+                        },
+                    },
+                    write: self.write,
+                })
+            },
+            need => Err(error!(
+                "schema non-comformance, need {:?}, got Enum",
+                need,
+            )),
+        }
+    }
 }
 
 pub struct OptionEncoderState<'a, O> {
@@ -412,12 +454,16 @@ impl<'a, W: Write, O: Outer<W>> StructEncoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 }
-/*
-pub struct EnumEncoderState<'a, O> {
-    variants: &'a [EnumSchemaVariants],
+
+pub struct EnumContextLayer<'a, O> {
+    variants: &'a [EnumSchemaVariant],
     outer: O,
 }
 
-pub struct EnumEncoder
+impl<'a, W, O: Outer<W>> Outer<W> for EnumContextLayer<'a, O> {
+    type Encoder = <O as Outer<W>>::Encoder;
 
-impl<'a, W: Write, O: Outer<W>> EnumEncoderState<'a, */
+    fn encoder(self, write: W) -> Self::Encoder {
+        self.outer.encoder(write)
+    }
+}
