@@ -118,16 +118,31 @@ impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 
-    pub fn start_option(self) -> Result<OptionEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn encode_none(mut self) -> Result<O::Encoder> {
+        ensure!(
+            matches!(self.state.schema, &Schema::Option(_)),
+            "schema non-comformance, need {:?}, got Option",
+            self.state.schema,
+        );
+        self.write.write_all(&[0])?;
+        Ok(self.state.outer.encoder(self.write))
+    }
+
+    pub fn start_some(mut self) -> Result<Encoder<'a, W, OptionContextLayer<'a, EncoderState<'a, O>>>> {
         match self.state.schema {
-            &Schema::Option(ref inner_schema) => Ok(OptionEncoder {
-                state: OptionEncoderState {
-                    inner_schema: &**inner_schema,
-                    outer: self.state,
-                    count: false,
-                },
-                write: self.write,
-            }),
+            &Schema::Option(ref inner_schema) => {
+                self.write.write_all(&[1])?;
+                Ok(Encoder {
+                    state: EncoderState {
+                        schema: inner_schema,
+                        outer: OptionContextLayer {
+                            inner_schema,
+                            outer: self.state,
+                        },
+                    },
+                    write: self.write,
+                })
+            },
             need => Err(error!(
                 "schema non-comformance, need {:?}, got Option",
                 need,
@@ -243,53 +258,19 @@ impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
     }
 }
 
-pub struct OptionEncoderState<'a, O> {
+pub struct OptionContextLayer<'a, O> {
     inner_schema: &'a Schema,
     outer: O,
-    count: bool,
 }
 
-impl<'a, W, O> Outer<W> for OptionEncoderState<'a, O> {
-    type Encoder = OptionEncoder<'a, W, O>;
+impl<'a, W, O: Outer<W>> Outer<W> for OptionContextLayer<'a, O> {
+    type Encoder = <O as Outer<W>>::Encoder;
 
     fn encoder(self, write: W) -> Self::Encoder {
-        OptionEncoder {
-            state: self,
-            write,
-        }
+        self.outer.encoder(write)
     }
 }
 
-pub struct OptionEncoder<'a, W, O> {
-    state: OptionEncoderState<'a, O>,
-    write: W,
-}
-
-impl<'a, W: Write, O: Outer<W>> OptionEncoder<'a, W, O> {
-    pub fn start_some(mut self) -> Result<Encoder<'a, W, OptionEncoderState<'a, O>>> {
-        ensure!(
-            !self.state.count,
-            "start_some called multiple times",
-        );
-        self.state.count = true;
-
-        self.write.write_all(&[1])?;
-        Ok(Encoder {
-            state: EncoderState {
-                schema: self.state.inner_schema,
-                outer: self.state,
-            },
-            write: self.write,
-        })
-    }
-
-    pub fn finish(mut self) -> Result<O::Encoder> {
-        if !self.state.count {
-            self.write.write_all(&[0])?;
-        }
-        Ok(self.state.outer.encoder(self.write))
-    }
-}
 
 pub struct SeqEncoderState<'a, O> {
     len: usize,
