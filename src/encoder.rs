@@ -30,9 +30,23 @@ pub trait Outer<'a, W> {
 
     fn encoder(self, write: W) -> Self::Encoder;
 
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema>;
+    fn recurse_schema(&self, n: usize) -> Option<&'a Schema>;
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SchemaBase;
+
+impl<'a, W> Outer<'a, W> for SchemaBase {
+    type Encoder = W;
+
+    fn encoder(self, write: W) -> Self::Encoder {
+        write
+    }
+
+    fn recurse_schema(&self, _: usize) -> Option<&'a Schema> {
+        None
+    }
+}
 
 pub struct EncoderState<'a, O> {
     schema: &'a Schema,
@@ -49,7 +63,7 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EncoderState<'a, O> {
         }
     }
 
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
         match n {
             0 => Some(self.schema),
             n => self.outer.recurse_schema(n - 1),
@@ -65,6 +79,7 @@ pub struct Encoder<'a, W, O> {
 macro_rules! encode_le_bytes {
     ($($m:ident($t:ty),)*)=>{$(
         pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
+            self.recurse()?;
             self.validate(schema!(i32))?;
             self.write.write_all(&n.to_le_bytes())?;
             Ok(self.state.outer.encoder(self.write))
@@ -73,6 +88,22 @@ macro_rules! encode_le_bytes {
 }
 
 impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
+    fn recurse(&mut self) -> Result<()> {
+        while let &Schema::Recurse(n) = self.state.schema {
+            ensure!(
+                n > 0,
+                "schema problem: recurse level 0 would cause infinite loop",
+            );
+            self.state.schema = self.state
+                .recurse_schema(n)
+                .ok_or_else(|| error!(
+                    "schema problem: recurse level {} goes beyond root of schema",
+                    n,
+                ))?;
+        }
+        Ok(())
+    }
+
     fn validate(&self, got: Schema) -> Result<()> {
         ensure!(
             self.state.schema == &got,
@@ -99,35 +130,41 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     );
 
     pub fn encode_char(mut self, c: char) -> Result<O::Encoder> {
+        self.recurse()?;
         self.validate(schema!(char))?;
         self.write.write_all(&(c as u32).to_le_bytes())?;
         Ok(self.state.outer.encoder(self.write))
     }
 
     pub fn encode_bool(mut self, c: bool) -> Result<O::Encoder> {
+        self.recurse()?;
         self.validate(schema!(bool))?;
         self.write.write_all(&[c as u8])?;
         Ok(self.state.outer.encoder(self.write))
     }
 
     pub fn encode_str(mut self, s: &str) -> Result<O::Encoder> {
+        self.recurse()?;
         self.validate(schema!(str))?;
         self.write.write_all(s.as_bytes())?;
         Ok(self.state.outer.encoder(self.write))
     }
 
     pub fn encode_bytes(mut self, b: &[u8]) -> Result<O::Encoder> {
+        self.recurse()?;
         self.validate(schema!(bytes))?;
         self.write.write_all(b)?;
         Ok(self.state.outer.encoder(self.write))
     }
 
-    pub fn encode_unit(self) -> Result<O::Encoder> {
+    pub fn encode_unit(mut self) -> Result<O::Encoder> {
+        self.recurse()?;
         self.validate(schema!(()))?;
         Ok(self.state.outer.encoder(self.write))
     }
 
     pub fn encode_none(mut self) -> Result<O::Encoder> {
+        self.recurse()?;
         ensure!(
             matches!(self.state.schema, &Schema::Option(_)),
             "schema non-comformance, need {:?}, got Option",
@@ -138,6 +175,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     }
 
     pub fn start_some(mut self) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
+        self.recurse()?;
         match self.state.schema {
             &Schema::Option(ref inner_schema) => {
                 self.write.write_all(&[1])?;
@@ -157,6 +195,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     }
 
     pub fn start_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, EncoderState<'a, O>>> {
+        self.recurse()?;
         match self.state.schema {
             &Schema::Seq(SeqSchema {
                 len: need_len,
@@ -189,7 +228,8 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_tuple(self) -> Result<TupleEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn start_tuple(mut self) -> Result<TupleEncoder<'a, W, EncoderState<'a, O>>> {
+        self.recurse()?;
         match self.state.schema {
             &Schema::Tuple(ref inner_schemas) => Ok(TupleEncoder {
                 state: TupleEncoderState {
@@ -206,7 +246,8 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_struct(self) -> Result<StructEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn start_struct(mut self) -> Result<StructEncoder<'a, W, EncoderState<'a, O>>> {
+        self.recurse()?;
         match self.state.schema {
             &Schema::Struct(ref fields) => Ok(StructEncoder {
                 state: StructEncoderState {
@@ -228,6 +269,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         variant_ord: usize,
         variant_name: &str,
     ) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
+        self.recurse()?;
         match self.state.schema {
             &Schema::Enum(ref variants) => {
                 ensure!(
@@ -280,7 +322,7 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for SeqEncoderState<'a, O> {
         }
     }
 
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
         self.outer.recurse_schema(n)
     }
 }
@@ -335,7 +377,7 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for TupleEncoderState<'a, O> {
         }
     }
 
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
         self.outer.recurse_schema(n)
     }
 }
@@ -389,7 +431,7 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for StructEncoderState<'a, O> {
         }
     }
 
-    fn recurse_schema(self, n: usize) -> Option<&'a Schema> {
+    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
         self.outer.recurse_schema(n)
     }
 }
