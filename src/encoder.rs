@@ -187,8 +187,9 @@ impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
         match self.state.schema {
             &Schema::Tuple(ref inner_schemas) => Ok(TupleEncoder {
                 state: TupleEncoderState {
-                    remaining_inner_schemas: inner_schemas,
+                    inner_schemas,
                     outer: self.state,
+                    count: 0,
                 },
                 write: self.write,
             }),
@@ -203,8 +204,9 @@ impl<'a, W: Write, O: Outer<W>> Encoder<'a, W, O> {
         match self.state.schema {
             &Schema::Struct(ref fields) => Ok(StructEncoder {
                 state: StructEncoderState {
-                    remaining_fields: fields,
+                    fields,
                     outer: self.state,
+                    count: 0,
                 },
                 write: self.write,
             }),
@@ -271,7 +273,6 @@ impl<'a, W, O: Outer<W>> Outer<W> for OptionContextLayer<'a, O> {
     }
 }
 
-
 pub struct SeqEncoderState<'a, O> {
     len: usize,
     inner_schema: &'a Schema,
@@ -299,7 +300,7 @@ impl<'a, W: Write, O: Outer<W>> SeqEncoder<'a, W, O> {
     pub fn start_elem(mut self) -> Result<Encoder<'a, W, SeqEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.len,
-            "too many start_elem calls, promised exactly {}",
+            "too many SeqEncoder::start_elem calls, promised exactly {}",
             self.state.len,
         );
         self.state.count += 1;
@@ -316,7 +317,7 @@ impl<'a, W: Write, O: Outer<W>> SeqEncoder<'a, W, O> {
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
             self.state.count == self.state.len,
-            "not enough start_elem calls, promised exactly {} but provided {}",
+            "not enough SeqEncoder::start_elem calls, promised exactly {} but provided {}",
             self.state.len,
             self.state.count,
         );
@@ -325,8 +326,9 @@ impl<'a, W: Write, O: Outer<W>> SeqEncoder<'a, W, O> {
 }
 
 pub struct TupleEncoderState<'a, O> {
-    remaining_inner_schemas: &'a [Schema],
+    inner_schemas: &'a [Schema],
     outer: O,
+    count: usize,
 }
 
 impl<'a, W, O> Outer<W> for TupleEncoderState<'a, O> {
@@ -347,36 +349,36 @@ pub struct TupleEncoder<'a, W, O> {
 
 impl<'a, W: Write, O: Outer<W>> TupleEncoder<'a, W, O> {
     pub fn start_elem(mut self) -> Result<Encoder<'a, W, TupleEncoderState<'a, O>>> {
-        if let Some((first, rest)) = self.state.remaining_inner_schemas.split_first() {
-            self.state.remaining_inner_schemas = rest;
+        ensure!(
+            self.state.count < self.state.inner_schemas.len(),
+            "too many TupleEncoder::start_elem calls, no additional elements expected",
+        );
+        let inner_schema = &self.state.inner_schemas[self.state.count];
+        self.state.count += 1;
 
-            Ok(Encoder {
-                state: EncoderState {
-                    schema: first,
-                    outer: self.state,
-                },
-                write: self.write,
-            })
-        } else {
-            Err(error!(
-                "too many Tuple start_elem calls"
-            ))
-        }
+        Ok(Encoder {
+            state: EncoderState {
+                schema: inner_schema,
+                outer: self.state,
+            },
+            write: self.write,
+        })
     }
 
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
-            self.state.remaining_inner_schemas.is_empty(),
-            "not enough Tuple start_elem calls, expected additional elements: {:?}",
-            self.state.remaining_inner_schemas,
+            self.state.count == self.state.inner_schemas.len(),
+            "not enough Tuple::start_elem calls, expected additional elements: {:?}",
+            &self.state.inner_schemas[self.state.count..],
         );
         Ok(self.state.outer.encoder(self.write))
     }
 }
 
 pub struct StructEncoderState<'a, O> {
-    remaining_fields: &'a [StructSchemaField],
+    fields: &'a [StructSchemaField],
     outer: O,
+    count: usize,
 }
 
 impl<'a, W, O> Outer<W> for StructEncoderState<'a, O> {
@@ -397,40 +399,36 @@ pub struct StructEncoder<'a, W, O> {
 
 impl<'a, W: Write, O: Outer<W>> StructEncoder<'a, W, O> {
     pub fn start_field(mut self, name: &str) -> Result<Encoder<'a, W, StructEncoderState<'a, O>>> {
-        if let Some((first, rest)) = self.state.remaining_fields.split_first() {
-            let &StructSchemaField {
-                name: ref need_name,
-                inner: ref inner_schema,
-            } = first;
+        ensure!(
+            self.state.count < self.state.fields.len(),
+            "too many start_field calls, no additional fields expected",
+        );
+        let &StructSchemaField {
+            name: ref need_name,
+            inner: ref inner_schema,
+        } = &self.state.fields[self.state.count];
+        ensure!(
+            need_name == name,
+            "schema non-comformance, need field {:?}, got field {:?}",
+            need_name,
+            name,
+        );
+        self.state.count += 1;
 
-            ensure!(
-                need_name == name,
-                "schema non-comformance, need field {:?}, got field {:?}",
-                need_name,
-                name,
-            );
-
-            self.state.remaining_fields = rest;
-
-            Ok(Encoder {
-                state: EncoderState {
-                    schema: inner_schema,
-                    outer: self.state,
-                },
-                write: self.write,
-            })
-        } else {
-            Err(error!(
-                "too many start_field calls"
-            ))
-        }
+        Ok(Encoder {
+            state: EncoderState {
+                schema: inner_schema,
+                outer: self.state,
+            },
+            write: self.write,
+        })
     }
 
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
-            self.state.remaining_fields.is_empty(),
+            self.state.count == self.state.fields.len(),
             "not enough start_field calls, expected additional fields: {:?}",
-            self.state.remaining_fields,
+            &self.state.fields[self.state.count..],
         );
         Ok(self.state.outer.encoder(self.write))
     }
