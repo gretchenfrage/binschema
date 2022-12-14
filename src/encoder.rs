@@ -48,6 +48,7 @@ impl<'a, W> Outer<'a, W> for SchemaBase {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct EncoderState<'a, O> {
     schema: &'a Schema,
     outer: O,
@@ -71,29 +72,43 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EncoderState<'a, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Encoder<'a, W, O> {
     state: EncoderState<'a, O>,
     write: W,
 }
 
 macro_rules! encode_le_bytes {
-    ($($m:ident($t:ty),)*)=>{$(
+    ($($m:ident($t:ident),)*)=>{$(
         pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
             self.recurse()?;
-            self.validate(schema!(i32))?;
+            self.validate(schema!($t))?;
             self.write.write_all(&n.to_le_bytes())?;
             Ok(self.state.outer.encoder(self.write))
         }
     )*};
 }
 
-impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
+impl<'a, W> Encoder<'a, W, SchemaBase> {
+    pub fn new(write: W, schema: &'a Schema) -> Self {
+        Encoder {
+            state: EncoderState {
+                schema,
+                outer: SchemaBase,
+            },
+            write,
+        }
+    }
+}
+
+impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
     fn recurse(&mut self) -> Result<()> {
         while let &Schema::Recurse(n) = self.state.schema {
             ensure!(
                 n > 0,
                 "schema problem: recurse level 0 would cause infinite loop",
             );
+            dbg!(&self.state);
             self.state.schema = self.state
                 .recurse_schema(n)
                 .ok_or_else(|| error!(
@@ -174,7 +189,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 
-    pub fn start_some(mut self) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
+    pub fn begin_some(mut self) -> Result<Encoder<'a, W, O>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Option(ref inner_schema) => {
@@ -182,7 +197,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: self.state,
+                        outer: self.state.outer,
                     },
                     write: self.write,
                 })
@@ -194,7 +209,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn begin_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, O>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Seq(SeqSchema {
@@ -215,7 +230,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                     state: SeqEncoderState {
                         len,
                         inner_schema,
-                        outer: self.state,
+                        outer: self.state.outer,
                         count: 0,
                     },
                     write: self.write,
@@ -228,13 +243,13 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_tuple(mut self) -> Result<TupleEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn begin_tuple(mut self) -> Result<TupleEncoder<'a, W, O>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Tuple(ref inner_schemas) => Ok(TupleEncoder {
                 state: TupleEncoderState {
                     inner_schemas,
-                    outer: self.state,
+                    outer: self.state.outer,
                     count: 0,
                 },
                 write: self.write,
@@ -246,13 +261,13 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_struct(mut self) -> Result<StructEncoder<'a, W, EncoderState<'a, O>>> {
+    pub fn begin_struct(mut self) -> Result<StructEncoder<'a, W, O>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Struct(ref fields) => Ok(StructEncoder {
                 state: StructEncoderState {
                     fields,
-                    outer: self.state,
+                    outer: self.state.outer,
                     count: 0,
                 },
                 write: self.write,
@@ -264,11 +279,11 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         }
     }
 
-    pub fn start_enum(
+    pub fn begin_enum(
         mut self,
         variant_ord: usize,
         variant_name: &str,
-    ) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
+    ) -> Result<Encoder<'a, W, O>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Enum(ref variants) => {
@@ -292,7 +307,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: self.state,
+                        outer: self.state.outer,
                     },
                     write: self.write,
                 })
@@ -305,6 +320,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SeqEncoderState<'a, O> {
     len: usize,
     inner_schema: &'a Schema,
@@ -327,16 +343,17 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for SeqEncoderState<'a, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SeqEncoder<'a, W, O> {
     state: SeqEncoderState<'a, O>,
     write: W,
 }
 
 impl<'a, W: Write, O: Outer<'a, W>> SeqEncoder<'a, W, O> {
-    pub fn start_elem(mut self) -> Result<Encoder<'a, W, SeqEncoderState<'a, O>>> {
+    pub fn begin_elem(mut self) -> Result<Encoder<'a, W, SeqEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.len,
-            "too many SeqEncoder::start_elem calls, promised exactly {}",
+            "too many SeqEncoder::begin_elem calls, promised exactly {}",
             self.state.len,
         );
         self.state.count += 1;
@@ -353,7 +370,7 @@ impl<'a, W: Write, O: Outer<'a, W>> SeqEncoder<'a, W, O> {
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
             self.state.count == self.state.len,
-            "not enough SeqEncoder::start_elem calls, promised exactly {} but provided {}",
+            "not enough SeqEncoder::begin_elem calls, promised exactly {} but provided {}",
             self.state.len,
             self.state.count,
         );
@@ -361,6 +378,7 @@ impl<'a, W: Write, O: Outer<'a, W>> SeqEncoder<'a, W, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TupleEncoderState<'a, O> {
     inner_schemas: &'a [Schema],
     outer: O,
@@ -382,16 +400,17 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for TupleEncoderState<'a, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TupleEncoder<'a, W, O> {
     state: TupleEncoderState<'a, O>,
     write: W,
 }
 
 impl<'a, W: Write, O: Outer<'a, W>> TupleEncoder<'a, W, O> {
-    pub fn start_elem(mut self) -> Result<Encoder<'a, W, TupleEncoderState<'a, O>>> {
+    pub fn begin_elem(mut self) -> Result<Encoder<'a, W, TupleEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.inner_schemas.len(),
-            "too many TupleEncoder::start_elem calls, no additional elements expected",
+            "too many TupleEncoder::begin_elem calls, no additional elements expected",
         );
         let inner_schema = &self.state.inner_schemas[self.state.count];
         self.state.count += 1;
@@ -408,13 +427,14 @@ impl<'a, W: Write, O: Outer<'a, W>> TupleEncoder<'a, W, O> {
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
             self.state.count == self.state.inner_schemas.len(),
-            "not enough Tuple::start_elem calls, expected additional elements: {:?}",
+            "not enough Tuple::begin_elem calls, expected additional elements: {:?}",
             &self.state.inner_schemas[self.state.count..],
         );
         Ok(self.state.outer.encoder(self.write))
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct StructEncoderState<'a, O> {
     fields: &'a [StructSchemaField],
     outer: O,
@@ -436,16 +456,17 @@ impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for StructEncoderState<'a, O> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct StructEncoder<'a, W, O> {
     state: StructEncoderState<'a, O>,
     write: W,
 }
 
 impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
-    pub fn start_field(mut self, name: &str) -> Result<Encoder<'a, W, StructEncoderState<'a, O>>> {
+    pub fn begin_field(mut self, name: &str) -> Result<Encoder<'a, W, StructEncoderState<'a, O>>> {
         ensure!(
             self.state.count < self.state.fields.len(),
-            "too many start_field calls, no additional fields expected",
+            "too many begin_field calls, no additional fields expected",
         );
         let &StructSchemaField {
             name: ref need_name,
@@ -471,7 +492,7 @@ impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
     pub fn finish(self) -> Result<O::Encoder> {
         ensure!(
             self.state.count == self.state.fields.len(),
-            "not enough start_field calls, expected additional fields: {:?}",
+            "not enough begin_field calls, expected additional fields: {:?}",
             &self.state.fields[self.state.count..],
         );
         Ok(self.state.outer.encoder(self.write))

@@ -150,7 +150,7 @@ tuples_serde_schema!(A, B, C, D, E, F, G, H, I, J, K);
 impl<T: SerdeSchema> SerdeSchema for Range<T> {
     fn schema() -> Schema {
         schema!({
-            (start: %T::schema()),
+            (begin: %T::schema()),
             (end: %T::schema()),
         })
     }
@@ -159,7 +159,7 @@ impl<T: SerdeSchema> SerdeSchema for Range<T> {
 impl<T: SerdeSchema> SerdeSchema for RangeInclusive<T> {
     fn schema() -> Schema {
         schema!({
-            (start: %T::schema()),
+            (begin: %T::schema()),
             (end: %T::schema()),
         })
     }
