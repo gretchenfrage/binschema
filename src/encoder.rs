@@ -55,13 +55,10 @@ pub struct EncoderState<'a, O> {
 }
 
 impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EncoderState<'a, O> {
-    type Encoder = Encoder<'a, W, O>;
+    type Encoder = <O as Outer<'a, W>>::Encoder;
 
     fn encoder(self, write: W) -> Self::Encoder {
-        Encoder {
-            state: self,
-            write,
-        }
+        self.outer.encoder(write)
     }
 
     fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
@@ -101,14 +98,13 @@ impl<'a, W> Encoder<'a, W, SchemaBase> {
     }
 }
 
-impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
+impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     fn recurse(&mut self) -> Result<()> {
         while let &Schema::Recurse(n) = self.state.schema {
             ensure!(
                 n > 0,
                 "schema problem: recurse level 0 would cause infinite loop",
             );
-            dbg!(&self.state);
             self.state.schema = self.state
                 .recurse_schema(n)
                 .ok_or_else(|| error!(
@@ -189,7 +185,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 
-    pub fn begin_some(mut self) -> Result<Encoder<'a, W, O>> {
+    pub fn begin_some(mut self) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Option(ref inner_schema) => {
@@ -197,7 +193,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: self.state.outer,
+                        outer: self.state,
                     },
                     write: self.write,
                 })
@@ -209,7 +205,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
         }
     }
 
-    pub fn begin_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, O>> {
+    pub fn begin_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, EncoderState<'a, O>>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Seq(SeqSchema {
@@ -230,7 +226,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
                     state: SeqEncoderState {
                         len,
                         inner_schema,
-                        outer: self.state.outer,
+                        outer: self.state,
                         count: 0,
                     },
                     write: self.write,
@@ -243,13 +239,13 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
         }
     }
 
-    pub fn begin_tuple(mut self) -> Result<TupleEncoder<'a, W, O>> {
+    pub fn begin_tuple(mut self) -> Result<TupleEncoder<'a, W, EncoderState<'a, O>>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Tuple(ref inner_schemas) => Ok(TupleEncoder {
                 state: TupleEncoderState {
                     inner_schemas,
-                    outer: self.state.outer,
+                    outer: self.state,
                     count: 0,
                 },
                 write: self.write,
@@ -261,13 +257,13 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
         }
     }
 
-    pub fn begin_struct(mut self) -> Result<StructEncoder<'a, W, O>> {
+    pub fn begin_struct(mut self) -> Result<StructEncoder<'a, W, EncoderState<'a, O>>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Struct(ref fields) => Ok(StructEncoder {
                 state: StructEncoderState {
                     fields,
-                    outer: self.state.outer,
+                    outer: self.state,
                     count: 0,
                 },
                 write: self.write,
@@ -283,7 +279,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
         mut self,
         variant_ord: usize,
         variant_name: &str,
-    ) -> Result<Encoder<'a, W, O>> {
+    ) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
         self.recurse()?;
         match self.state.schema {
             &Schema::Enum(ref variants) => {
@@ -307,7 +303,7 @@ impl<'a, W: Write, O: Outer<'a, W> + std::fmt::Debug> Encoder<'a, W, O> {
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
-                        outer: self.state.outer,
+                        outer: self.state,
                     },
                     write: self.write,
                 })
