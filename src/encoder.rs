@@ -1,10 +1,14 @@
 
 use crate::schema::*;
-use std::io::{
-    Write,
-    Error,
-    ErrorKind,
-    Result,
+use std::{
+    io::{
+        Write,
+        Error,
+        ErrorKind,
+        Result,
+    },
+    mem::forget,
+    fmt::{self, Formatter, Debug},
 };
 
 macro_rules! error {
@@ -16,15 +20,289 @@ macro_rules! error {
     };
 }
 
+macro_rules! bail {
+    ($($e:tt)*)=>{
+        return Err(error!($($e)*))
+    };
+}
+
 macro_rules! ensure {
     ($c:expr, $($e:tt)*)=>{
         if !$c {
-            return Err(error!($($e)*));
+            bail!($($e)*);
         }
     };
 }
 
+#[derive(Debug)]
+pub struct EncoderStateAlloc {
+    ptr: *mut (),
+    capacity: usize,
+}
 
+impl EncoderStateAlloc {
+    pub fn new() -> Self {
+        Self::from_stack(Vec::new())
+    }
+
+    fn from_stack(mut stack: Vec<StackFrame<'_>>) -> Self {
+        let ptr = stack.as_mut_ptr() as *mut ();
+        let capacity = stack.capacity();
+        forget(stack);
+        EncoderStateAlloc { ptr, capacity }
+    }
+}
+
+impl Default for EncoderStateAlloc {
+    fn default() -> Self {
+        EncoderStateAlloc::new()
+    }
+}
+
+pub struct EncoderState<'a, W> {
+    stack: Vec<StackFrame<'a>>,
+    write: W,
+}
+
+impl<'a, W> Debug for EncoderState<'a, W> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("EncoderState")
+            .field("stack", &self.stack)
+            .finish_non_exhaustive()
+    }
+} 
+
+#[derive(Debug)]
+struct StackFrame<'a> {
+    schema: &'a Schema,
+    api_state: ApiState,
+}
+
+#[derive(Debug)]
+enum ApiState {
+    Need,
+    AutoFinishInProg,
+    StructInProg {
+        next_need: usize,
+    },
+    TupleInProg {
+        next_need: usize,
+    },
+    SeqInProg {
+        declared_len: usize,
+        encoded_len: usize,
+    },
+}
+
+impl<'a, W> EncoderState<'a, W> {
+    pub fn new(
+        schema: &'a Schema,
+        write: W,
+        alloc: EncoderStateAlloc,
+    ) -> Self {
+        let mut stack = unsafe {
+            Vec::from_raw_parts(
+                alloc.ptr as *mut StackFrame<'a>,
+                0,
+                alloc.capacity,
+            )
+        };
+        stack.push(StackFrame {
+            schema,
+            api_state: ApiState::Need,
+        });
+        EncoderState { stack, write }
+    }
+
+    pub fn encoder<'b>(&'b mut self) -> Encoder<'b, 'a, W> {
+        Encoder(self)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    pub fn into_alloc(mut self) -> EncoderStateAlloc {
+        self.stack.clear();
+        EncoderStateAlloc::from_stack(self.stack)
+    }
+}
+
+impl<'a, W> From<EncoderState<'a, W>> for EncoderStateAlloc {
+    fn from(state: EncoderState<'a, W>) -> Self {
+        state.into_alloc()
+    }
+}
+
+#[derive(Debug)]
+pub struct Encoder<'b, 'a, W>(&'b mut EncoderState<'a, W>);
+
+macro_rules! validate_encode {
+    ($self:ident, |$need:ident| $cond:expr, $got:expr,)=>{
+        match $self.0.stack.iter().rev().next() {
+            None => bail!("API usage error, encode to finished encoder"),
+            Some(&StackFrame {
+                schema: $need,
+                api_state: ApiState::Need,
+            }) => match $cond {
+                Some(ret) => ret,
+                None => bail!(
+                    "schema non-comformance, need {:?}, got {}",
+                    $need,
+                    $got,
+                ),
+            }
+            Some(&StackFrame { ref api_state, .. }) => bail!(
+                "API usage error, need {}, got {}",
+                match api_state {
+                    &ApiState::Need => unreachable!(),
+                    &ApiState::AutoFinishInProg => unreachable!(),
+                    &ApiState::StructInProg { .. } => "struct field",
+                    &ApiState::TupleInProg { .. } => "tuple elem",
+                    &ApiState::SeqInProg { .. } => "seq elem",
+                },
+                stringify!($got),
+            ),
+        }
+    };
+}
+
+macro_rules! validate_encode_eq {
+    ($self:ident, $got:expr)=>{
+        validate_encode!(
+            $self,
+            |s| if s == &$got { Some(()) } else { None },
+            format_args!("{:?}", $got),
+        )
+    };
+}
+
+macro_rules! validate_encode_matches {
+    ($self:ident, $got:pat => $ret:expr)=>{
+        validate_encode!(
+            $self,
+            |s| match s {
+                $got => Some($ret),
+                _ => None,
+            },
+            stringify!($got),
+        )
+    };
+}
+
+macro_rules! encode_le_bytes {
+    ($($m:ident($t:ident),)*)=>{$(
+        pub fn $m(&mut self, n: $t) -> Result<()> {
+            validate_encode_eq!(self, schema!($t));
+            self.write(&n.to_le_bytes())?;
+            self.pop();
+            Ok(())
+        }
+    )*};
+}
+
+impl<'b, 'a, W: Write> Encoder<'b, 'a, W> {
+    fn write(&mut self, b: &[u8]) -> Result<()> {
+        self.0.write.write_all(b)
+    }
+
+    fn top(&mut self) -> &mut StackFrame<'a> {
+        let i = self.0.stack.len() - 1;
+        &mut self.0.stack[i]
+    }
+
+    fn pop(&mut self) {
+        self.0.stack.pop().unwrap();
+        while matches!(
+            self.0.stack.iter().rev().next(),
+            Some(&StackFrame { api_state: ApiState::AutoFinishInProg, .. })
+        ) {
+            self.0.stack.pop().unwrap();
+        }
+    }
+
+
+    encode_le_bytes!(
+        encode_u8(u8),
+        encode_u16(u16),
+        //encode_u32(u32),
+        //encode_u64(u64),
+        encode_i8(i8),
+        encode_i16(i16),
+        //encode_u128(u128),
+        //encode_i32(i32),
+        //encode_i64(i64),
+        //encode_i128(i128),
+        //encode_f32(f32),
+        //encode_f64(f64),
+        // TODO: big int encoding
+    );
+
+    pub fn encode_char(&mut self, c: char) -> Result<()> {
+        validate_encode_eq!(self, schema!(char));
+        self.write(&(c as u32).to_le_bytes())?;
+        self.pop();
+        Ok(())
+    }
+
+    pub fn encode_bool(&mut self, b: bool) -> Result<()> {
+        validate_encode_eq!(self, schema!(bool));
+        self.write(&[b as u8])?;
+        self.pop();
+        Ok(())
+    }
+
+    pub fn encode_unit(&mut self) -> Result<()> {
+        validate_encode_eq!(self, schema!(()));
+        self.pop();
+        Ok(())
+    }
+
+    /*
+    pub fn encode_str(mut self, s: &str) -> Result<O::Encoder> {
+        self.recurse()?;
+        self.validate(schema!(str))?;
+        self.write.write_all(s.as_bytes())?;
+        Ok(self.state.outer.encoder(self.write))
+    }
+
+    pub fn encode_bytes(mut self, b: &[u8]) -> Result<O::Encoder> {
+        self.recurse()?;
+        self.validate(schema!(bytes))?;
+        self.write.write_all(b)?;
+        Ok(self.state.outer.encoder(self.write))
+    }
+    */
+
+    /// Completely encode a None value for an Option schema.
+    pub fn encode_none(&mut self) -> Result<()> {
+        validate_encode_matches!(self, &Schema::Option(_) => ());
+        self.write(&[0])?;
+        self.pop();
+        Ok(())
+    }
+
+    /// Begin encoding a Some value for an Option schema. This should be
+    /// followed by encoding the inner value, after which the Option will
+    /// auto-finish.
+    pub fn begin_some(&mut self) -> Result<()> {
+        let inner =
+            validate_encode_matches!(
+                self,
+                &Schema::Option(ref inner) => inner
+            );
+        self.write(&[1])?;
+        self.top().api_state = ApiState::AutoFinishInProg;
+        self.0.stack.push(StackFrame {
+            schema: inner,
+            api_state: ApiState::Need,
+        });
+        Ok(())
+    }
+}
+
+
+/*
 pub trait Outer<'a, W> {
     type Encoder;
 
@@ -494,3 +772,4 @@ impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
         Ok(self.state.outer.encoder(self.write))
     }
 }
+*/
