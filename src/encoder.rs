@@ -54,10 +54,37 @@ impl EncoderStateAlloc {
     }
 
     fn from_stack(mut stack: Vec<StackFrame<'_>>) -> Self {
+        stack.clear();
         let ptr = stack.as_mut_ptr() as *mut ();
         let capacity = stack.capacity();
         forget(stack);
         EncoderStateAlloc { ptr, capacity }
+    }
+
+
+
+    fn into_stack<'a>(self) -> Vec<StackFrame<'a>> {
+        unsafe {
+            let stack = Vec::from_raw_parts(
+                self.ptr as *mut StackFrame<'a>,
+                0,
+                self.capacity,
+            );
+            forget(self);
+            stack
+        }
+    }
+}
+
+impl Drop for EncoderStateAlloc {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Vec::from_raw_parts(
+                self.ptr as *mut StackFrame<'_>,
+                0,
+                self.capacity,
+            ));
+        }
     }
 }
 
@@ -108,13 +135,7 @@ impl<'a, W> EncoderState<'a, W> {
         write: W,
         alloc: EncoderStateAlloc,
     ) -> Self {
-        let mut stack = unsafe {
-            Vec::from_raw_parts(
-                alloc.ptr as *mut StackFrame<'a>,
-                0,
-                alloc.capacity,
-            )
-        };
+        let mut stack = alloc.into_stack();
         stack.push(StackFrame {
             schema,
             api_state: ApiState::NeedEncode,
