@@ -1,4 +1,5 @@
 
+
 use crate::schema::*;
 use std::{
     io::{
@@ -301,8 +302,20 @@ impl<'b, 'a, W: Write> Encoder<'b, 'a, W> {
     }
 }
 
-
 /*
+=======
+use crate::{
+    schema::*,
+    error::*,
+    var_len::*,
+};
+use std::io::{
+    Write,
+    Result,
+};
+
+>>>>>>> origin/main
+
 pub trait Outer<'a, W> {
     type Encoder;
 
@@ -364,6 +377,28 @@ macro_rules! encode_le_bytes {
     )*};
 }
 
+macro_rules! encode_var_len_uint {
+    ($($m:ident($t:ident),)*)=>{$(
+        pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
+            self.recurse()?;
+            self.validate(schema!($t))?;
+            write_var_len_uint(&mut self.write, n as u128)?;
+            Ok(self.state.outer.encoder(self.write))
+        }
+    )*};
+}
+
+macro_rules! encode_var_len_sint {
+    ($($m:ident($t:ident),)*)=>{$(
+        pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
+            self.recurse()?;
+            self.validate(schema!($t))?;
+            write_var_len_sint(&mut self.write, n as i128)?;
+            Ok(self.state.outer.encoder(self.write))
+        }
+    )*};
+}
+
 impl<'a, W> Encoder<'a, W, SchemaBase> {
     pub fn new(write: W, schema: &'a Schema) -> Self {
         Encoder {
@@ -406,16 +441,22 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     encode_le_bytes!(
         encode_u8(u8),
         encode_u16(u16),
+        encode_i8(i8),
+        encode_i16(i16),
+        encode_f32(f32),
+        encode_f64(f64),
+    );
+
+    encode_var_len_uint!(
         encode_u32(u32),
         encode_u64(u64),
         encode_u128(u128),
-        encode_i8(i8),
-        encode_i16(i16),
+    );
+
+    encode_var_len_sint!(
         encode_i32(i32),
         encode_i64(i64),
         encode_i128(i128),
-        encode_f32(f32),
-        encode_f64(f64),
     );
 
     pub fn encode_char(mut self, c: char) -> Result<O::Encoder> {
@@ -435,6 +476,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     pub fn encode_str(mut self, s: &str) -> Result<O::Encoder> {
         self.recurse()?;
         self.validate(schema!(str))?;
+        write_var_len_uint(&mut self.write, s.len() as _)?;
         self.write.write_all(s.as_bytes())?;
         Ok(self.state.outer.encoder(self.write))
     }
@@ -442,6 +484,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
     pub fn encode_bytes(mut self, b: &[u8]) -> Result<O::Encoder> {
         self.recurse()?;
         self.validate(schema!(bytes))?;
+        write_var_len_uint(&mut self.write, b.len() as _)?;
         self.write.write_all(b)?;
         Ok(self.state.outer.encoder(self.write))
     }
@@ -498,7 +541,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                         len,
                     );
                 } else {
-                    self.write.write_all(&(len as u64).to_le_bytes())?;
+                    write_var_len_uint(&mut self.write, len as _)?;
                 }
                 Ok(SeqEncoder {
                     state: SeqEncoderState {
@@ -577,7 +620,7 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
                     need_name,
                     variant_name,
                 );
-                self.write.write_all(&(variant_ord as u64).to_le_bytes())?;
+                write_ord(&mut self.write, variant_ord, variants.len())?;
                 Ok(Encoder {
                     state: EncoderState {
                         schema: inner_schema,
