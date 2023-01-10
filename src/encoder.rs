@@ -1,6 +1,13 @@
 
 
-use crate::schema::*;
+use crate::{
+    schema::*,
+    var_len::{
+        write_var_len_uint,
+        write_var_len_sint,
+        write_ord,
+    },
+};
 use std::{
     io::{
         Write,
@@ -81,17 +88,17 @@ struct StackFrame<'a> {
 
 #[derive(Debug)]
 enum ApiState {
-    Need,
     AutoFinishInProg,
-    StructInProg {
-        next_need: usize,
+    NeedEncode,
+    SeqInProg {
+        declared_len: usize,
+        encoded_len: usize,
     },
     TupleInProg {
         next_need: usize,
     },
-    SeqInProg {
-        declared_len: usize,
-        encoded_len: usize,
+    StructInProg {
+        next_need: usize,
     },
 }
 
@@ -110,7 +117,7 @@ impl<'a, W> EncoderState<'a, W> {
         };
         stack.push(StackFrame {
             schema,
-            api_state: ApiState::Need,
+            api_state: ApiState::NeedEncode,
         });
         EncoderState { stack, write }
     }
@@ -121,6 +128,14 @@ impl<'a, W> EncoderState<'a, W> {
 
     pub fn is_finished(&self) -> bool {
         self.stack.is_empty()
+    }
+
+    pub fn is_finished_or_err(&self) -> Result<()> {
+        if self.is_finished() {
+            Ok(())
+        } else {
+            Err(error!("API usage error, didn't finish encoding"))
+        }
     }
 
     pub fn into_alloc(mut self) -> EncoderStateAlloc {
@@ -138,66 +153,118 @@ impl<'a, W> From<EncoderState<'a, W>> for EncoderStateAlloc {
 #[derive(Debug)]
 pub struct Encoder<'b, 'a, W>(&'b mut EncoderState<'a, W>);
 
-macro_rules! validate_encode {
-    ($self:ident, |$need:ident| $cond:expr, $got:expr,)=>{
-        match $self.0.stack.iter().rev().next() {
-            None => bail!("API usage error, encode to finished encoder"),
-            Some(&StackFrame {
-                schema: $need,
-                api_state: ApiState::Need,
-            }) => match $cond {
+macro_rules! validate_top {
+    ($self:ident, |$top:ident| $opt_ret:expr, $got:expr)=>{
+        match $self.0.stack.iter_mut().rev().next() {
+            None => bail!("API usage error, usage of finished encoder"),
+            Some($top) => match $opt_ret {
                 Some(ret) => ret,
-                None => bail!(
-                    "schema non-comformance, need {:?}, got {}",
-                    $need,
-                    $got,
-                ),
-            }
-            Some(&StackFrame { ref api_state, .. }) => bail!(
-                "API usage error, need {}, got {}",
-                match api_state {
-                    &ApiState::Need => unreachable!(),
+                None => match &$top.api_state {
                     &ApiState::AutoFinishInProg => unreachable!(),
-                    &ApiState::StructInProg { .. } => "struct field",
-                    &ApiState::TupleInProg { .. } => "tuple elem",
-                    &ApiState::SeqInProg { .. } => "seq elem",
+                    &ApiState::NeedEncode => bail!(
+                        "schema non-comformance, need encode {:?}, got {}",
+                        $top.schema,
+                        $got,
+                    ),
+                    &ApiState::SeqInProg { .. } => bail!(
+                        "API usage error, need seq elem/finish, got {}",
+                        $got,
+                    ),
+                    &ApiState::TupleInProg { .. } => bail!(
+                        "API usage error, need tuple elem/finish, got {}",
+                        $got,
+                    ),
+                    &ApiState::StructInProg { .. } => bail!(
+                        "API usage error, need struct field/finish, got {}",
+                        $got,
+                    ),
                 },
-                stringify!($got),
-            ),
+            }
         }
     };
 }
 
-macro_rules! validate_encode_eq {
-    ($self:ident, $got:expr)=>{
-        validate_encode!(
+macro_rules! validate_top_matches {
+    ($self:ident, $top:pat => $ret:expr, $need:expr)=>{
+        validate_top!(
             $self,
-            |s| if s == &$got { Some(()) } else { None },
-            format_args!("{:?}", $got),
+            |top| match top {
+                $top => Some($ret),
+                _ => None,
+            },
+            $need
         )
     };
 }
 
-macro_rules! validate_encode_matches {
-    ($self:ident, $got:pat => $ret:expr)=>{
-        validate_encode!(
+macro_rules! validate_need_encode_eq {
+    ($self:ident, $got:expr)=>{
+        validate_top!(
             $self,
-            |s| match s {
-                $got => Some($ret),
-                _ => None,
-            },
-            stringify!($got),
+            |s| if
+                    matches!(&s.api_state, &ApiState::NeedEncode)
+                    && s.schema == &$got
+                {
+                    Some(())
+                } else {
+                    None
+                },
+            format_args!("encode {:?}", $got)
         )
+    };
+}
+
+macro_rules! validate_need_encode_matches {
+    ($self:ident, $pat:pat => $ret:expr, $got:expr)=>{
+        validate_top_matches!(
+            $self,
+            &mut StackFrame {
+                schema: $pat,
+                api_state: ApiState::NeedEncode,
+            } => $ret,
+            $got
+        )
+    };
+}
+
+macro_rules! match_or_unreachable {
+    ($expr:expr, $pat:pat => $ret:expr)=>{
+        match $expr {
+            $pat => $ret,
+            _ => unreachable!(),
+        }
     };
 }
 
 macro_rules! encode_le_bytes {
     ($($m:ident($t:ident),)*)=>{$(
-        pub fn $m(&mut self, n: $t) -> Result<()> {
-            validate_encode_eq!(self, schema!($t));
+        pub fn $m(&mut self, n: $t) -> Result<&mut Self> {
+            validate_need_encode_eq!(self, schema!($t));
             self.write(&n.to_le_bytes())?;
             self.pop();
-            Ok(())
+            Ok(self)
+        }
+    )*};
+}
+
+macro_rules! encode_var_len_uint {
+    ($($m:ident($t:ident),)*)=>{$(
+        pub fn $m(&mut self, n: $t) -> Result<&mut Self> {
+            validate_need_encode_eq!(self, schema!($t));
+            write_var_len_uint(&mut self.0.write, n as u128)?;
+            self.pop();
+            Ok(self)
+        }
+    )*};
+}
+
+macro_rules! encode_var_len_sint {
+    ($($m:ident($t:ident),)*)=>{$(
+        pub fn $m(&mut self, n: $t) -> Result<&mut Self> {
+            validate_need_encode_eq!(self, schema!($t));
+            write_var_len_sint(&mut self.0.write, n as i128)?;
+            self.pop();
+            Ok(self)
         }
     )*};
 }
@@ -212,6 +279,25 @@ impl<'b, 'a, W: Write> Encoder<'b, 'a, W> {
         &mut self.0.stack[i]
     }
 
+    fn push_need_encode(&mut self, mut schema: &'a Schema) -> Result<()> {
+        let mut i = self.0.stack.len();
+        while let &Schema::Recurse(n) = schema {
+            ensure!(
+                n > 0,
+                "invalid schema: recurse of level 0"
+            );
+            i = i
+                .checked_sub(n)
+                .ok_or_else(|| error!("invalid schema: recurse past base of stack"))?;
+            schema = self.0.stack[i].schema;
+        }
+        self.0.stack.push(StackFrame {
+            schema,
+            api_state: ApiState::NeedEncode,
+        });
+        Ok(())
+    }
+
     fn pop(&mut self) {
         self.0.stack.pop().unwrap();
         while matches!(
@@ -222,221 +308,6 @@ impl<'b, 'a, W: Write> Encoder<'b, 'a, W> {
         }
     }
 
-
-    encode_le_bytes!(
-        encode_u8(u8),
-        encode_u16(u16),
-        //encode_u32(u32),
-        //encode_u64(u64),
-        encode_i8(i8),
-        encode_i16(i16),
-        //encode_u128(u128),
-        //encode_i32(i32),
-        //encode_i64(i64),
-        //encode_i128(i128),
-        //encode_f32(f32),
-        //encode_f64(f64),
-        // TODO: big int encoding
-    );
-
-    pub fn encode_char(&mut self, c: char) -> Result<()> {
-        validate_encode_eq!(self, schema!(char));
-        self.write(&(c as u32).to_le_bytes())?;
-        self.pop();
-        Ok(())
-    }
-
-    pub fn encode_bool(&mut self, b: bool) -> Result<()> {
-        validate_encode_eq!(self, schema!(bool));
-        self.write(&[b as u8])?;
-        self.pop();
-        Ok(())
-    }
-
-    pub fn encode_unit(&mut self) -> Result<()> {
-        validate_encode_eq!(self, schema!(()));
-        self.pop();
-        Ok(())
-    }
-
-    /*
-    pub fn encode_str(mut self, s: &str) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(str))?;
-        self.write.write_all(s.as_bytes())?;
-        Ok(self.state.outer.encoder(self.write))
-    }
-
-    pub fn encode_bytes(mut self, b: &[u8]) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(bytes))?;
-        self.write.write_all(b)?;
-        Ok(self.state.outer.encoder(self.write))
-    }
-    */
-
-    /// Completely encode a None value for an Option schema.
-    pub fn encode_none(&mut self) -> Result<()> {
-        validate_encode_matches!(self, &Schema::Option(_) => ());
-        self.write(&[0])?;
-        self.pop();
-        Ok(())
-    }
-
-    /// Begin encoding a Some value for an Option schema. This should be
-    /// followed by encoding the inner value, after which the Option will
-    /// auto-finish.
-    pub fn begin_some(&mut self) -> Result<()> {
-        let inner =
-            validate_encode_matches!(
-                self,
-                &Schema::Option(ref inner) => inner
-            );
-        self.write(&[1])?;
-        self.top().api_state = ApiState::AutoFinishInProg;
-        self.0.stack.push(StackFrame {
-            schema: inner,
-            api_state: ApiState::Need,
-        });
-        Ok(())
-    }
-}
-
-/*
-=======
-use crate::{
-    schema::*,
-    error::*,
-    var_len::*,
-};
-use std::io::{
-    Write,
-    Result,
-};
-
->>>>>>> origin/main
-
-pub trait Outer<'a, W> {
-    type Encoder;
-
-    fn encoder(self, write: W) -> Self::Encoder;
-
-    fn recurse_schema(&self, n: usize) -> Option<&'a Schema>;
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct SchemaBase;
-
-impl<'a, W> Outer<'a, W> for SchemaBase {
-    type Encoder = W;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        write
-    }
-
-    fn recurse_schema(&self, _: usize) -> Option<&'a Schema> {
-        None
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EncoderState<'a, O> {
-    schema: &'a Schema,
-    outer: O,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for EncoderState<'a, O> {
-    type Encoder = <O as Outer<'a, W>>::Encoder;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        self.outer.encoder(write)
-    }
-
-    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
-        match n {
-            0 => Some(self.schema),
-            n => self.outer.recurse_schema(n - 1),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Encoder<'a, W, O> {
-    state: EncoderState<'a, O>,
-    write: W,
-}
-
-macro_rules! encode_le_bytes {
-    ($($m:ident($t:ident),)*)=>{$(
-        pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
-            self.recurse()?;
-            self.validate(schema!($t))?;
-            self.write.write_all(&n.to_le_bytes())?;
-            Ok(self.state.outer.encoder(self.write))
-        }
-    )*};
-}
-
-macro_rules! encode_var_len_uint {
-    ($($m:ident($t:ident),)*)=>{$(
-        pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
-            self.recurse()?;
-            self.validate(schema!($t))?;
-            write_var_len_uint(&mut self.write, n as u128)?;
-            Ok(self.state.outer.encoder(self.write))
-        }
-    )*};
-}
-
-macro_rules! encode_var_len_sint {
-    ($($m:ident($t:ident),)*)=>{$(
-        pub fn $m(mut self, n: $t) -> Result<O::Encoder> {
-            self.recurse()?;
-            self.validate(schema!($t))?;
-            write_var_len_sint(&mut self.write, n as i128)?;
-            Ok(self.state.outer.encoder(self.write))
-        }
-    )*};
-}
-
-impl<'a, W> Encoder<'a, W, SchemaBase> {
-    pub fn new(write: W, schema: &'a Schema) -> Self {
-        Encoder {
-            state: EncoderState {
-                schema,
-                outer: SchemaBase,
-            },
-            write,
-        }
-    }
-}
-
-impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
-    fn recurse(&mut self) -> Result<()> {
-        while let &Schema::Recurse(n) = self.state.schema {
-            ensure!(
-                n > 0,
-                "schema problem: recurse level 0 would cause infinite loop",
-            );
-            self.state.schema = self.state
-                .recurse_schema(n)
-                .ok_or_else(|| error!(
-                    "schema problem: recurse level {} goes beyond root of schema",
-                    n,
-                ))?;
-        }
-        Ok(())
-    }
-
-    fn validate(&self, got: Schema) -> Result<()> {
-        ensure!(
-            self.state.schema == &got,
-            "schema non-comformance, need {:?}, got {:?}",
-            self.state.schema,
-            got,
-        );
-        Ok(())
-    }
 
     encode_le_bytes!(
         encode_u8(u8),
@@ -459,360 +330,329 @@ impl<'a, W: Write, O: Outer<'a, W>> Encoder<'a, W, O> {
         encode_i128(i128),
     );
 
-    pub fn encode_char(mut self, c: char) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(char))?;
-        self.write.write_all(&(c as u32).to_le_bytes())?;
-        Ok(self.state.outer.encoder(self.write))
+    pub fn encode_char(&mut self, c: char) -> Result<&mut Self> {
+        validate_need_encode_eq!(self, schema!(char));
+        self.write(&(c as u32).to_le_bytes())?;
+        self.pop();
+        Ok(self)
     }
 
-    pub fn encode_bool(mut self, c: bool) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(bool))?;
-        self.write.write_all(&[c as u8])?;
-        Ok(self.state.outer.encoder(self.write))
+    pub fn encode_bool(&mut self, b: bool) -> Result<&mut Self> {
+        validate_need_encode_eq!(self, schema!(bool));
+        self.write(&[b as u8])?;
+        self.pop();
+        Ok(self)
     }
 
-    pub fn encode_str(mut self, s: &str) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(str))?;
-        write_var_len_uint(&mut self.write, s.len() as _)?;
-        self.write.write_all(s.as_bytes())?;
-        Ok(self.state.outer.encoder(self.write))
+    pub fn encode_unit(&mut self) -> Result<&mut Self> {
+        validate_need_encode_eq!(self, schema!(()));
+        self.pop();
+        Ok(self)
     }
 
-    pub fn encode_bytes(mut self, b: &[u8]) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(bytes))?;
-        write_var_len_uint(&mut self.write, b.len() as _)?;
-        self.write.write_all(b)?;
-        Ok(self.state.outer.encoder(self.write))
+    pub fn encode_str(&mut self, s: &str) -> Result<&mut Self> {
+        validate_need_encode_eq!(self, schema!(str));
+        write_var_len_uint(&mut self.0.write, s.len() as u128)?;
+        self.write(s.as_bytes())?;
+        self.pop();
+        Ok(self)
     }
 
-    pub fn encode_unit(mut self) -> Result<O::Encoder> {
-        self.recurse()?;
-        self.validate(schema!(()))?;
-        Ok(self.state.outer.encoder(self.write))
+    pub fn encode_bytes(&mut self ,s: &[u8]) -> Result<&mut Self> {
+        validate_need_encode_eq!(self, schema!(bytes));
+        write_var_len_uint(&mut self.0.write, s.len() as u128)?;
+        self.write(s)?;
+        self.pop();
+        Ok(self)
     }
 
-    pub fn encode_none(mut self) -> Result<O::Encoder> {
-        self.recurse()?;
-        ensure!(
-            matches!(self.state.schema, &Schema::Option(_)),
-            "schema non-comformance, need {:?}, got Option",
-            self.state.schema,
+    /// Completely encode a None value for an Option schema.
+    pub fn encode_none(&mut self) -> Result<&mut Self> {
+        validate_need_encode_matches!(
+            self,
+            &Schema::Option(_) => (),
+            "encode option"
         );
-        self.write.write_all(&[0])?;
-        Ok(self.state.outer.encoder(self.write))
+        self.write(&[0])?;
+        self.pop();
+        Ok(self)
     }
 
-    pub fn begin_some(mut self) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
-        self.recurse()?;
-        match self.state.schema {
-            &Schema::Option(ref inner_schema) => {
-                self.write.write_all(&[1])?;
-                Ok(Encoder {
-                    state: EncoderState {
-                        schema: inner_schema,
-                        outer: self.state,
+    /// Begin encoding a Some value for an Option schema. This should be
+    /// followed by encoding the inner value, after which the Option will
+    /// auto-finish.
+    pub fn begin_some(&mut self) -> Result<&mut Self> {
+        let inner =
+            validate_need_encode_matches!(
+                self,
+                &Schema::Option(ref inner) => inner,
+                "encode option"
+            );
+        self.write(&[1])?;
+        self.top().api_state = ApiState::AutoFinishInProg;
+        self.push_need_encode(inner)?;
+        Ok(self)
+    }
+
+    /// Begin encoding a seq. This should be followed by encoding the elements
+    /// with `begin_seq_elem` followed by a call to `finish_seq`.
+    pub fn begin_seq(&mut self, len: usize) -> Result<&mut Self> {
+        let need_len =
+            validate_need_encode_matches!(
+                self,
+                &Schema::Seq(SeqSchema { len, .. }) => len,
+                "encode seq"
+            );
+        if let Some(need_len) = need_len {
+            ensure!(
+                need_len == len,
+                "schema non-comformance, need seq len {}, got seq len {}",
+                need_len,
+                len
+            );
+        } else {
+            write_var_len_uint(&mut self.0.write, len as u128)?;
+        }
+        self.top().api_state =
+            ApiState::SeqInProg {
+                declared_len: len,
+                encoded_len: 0,
+            };
+        Ok(self)
+    }
+
+    /// Begin encoding an element in a seq. This should be followed by encoding
+    /// the inner value. See `begin_seq`,
+    pub fn begin_seq_elem(&mut self) -> Result<&mut Self> {
+        let (schema, declared_len, encoded_len) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::SeqInProg {
+                        declared_len,
+                        ref mut encoded_len,
+                    }
+                } => (schema, declared_len, encoded_len),
+                "seq elem"
+            );
+        ensure!(
+            *encoded_len + 1 <= declared_len,
+            "API usage error, begin seq elem at idx {}, but that is seq's declared len",
+            encoded_len
+        );
+        *encoded_len += 1;
+        self
+            .push_need_encode(match_or_unreachable!(
+                schema,
+                &Schema::Seq(SeqSchema { ref inner, .. }) => &**inner
+            ))?;
+        Ok(self)
+    }
+
+    /// Finish encoding a seq. See `begin_seq`.
+    pub fn finish_seq(&mut self) -> Result<&mut Self> {
+        let (declared_len, encoded_len) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    api_state: ApiState::SeqInProg {
+                        declared_len,
+                        encoded_len,
                     },
-                    write: self.write,
-                })
-            },
-            need => Err(error!(
-                "schema non-comformance, need {:?}, got Option",
-                need,
-            )),
-        }
+                    ..
+                } => (declared_len, encoded_len),
+                "seq finish"
+            );
+        ensure!(
+            encoded_len == declared_len,
+            "API usage error, finish seq of declared len {}, but only encoded {} elems",
+            declared_len,
+            encoded_len
+        );
+        self.pop();
+        Ok(self)
     }
 
-    pub fn begin_seq(mut self, len: usize) -> Result<SeqEncoder<'a, W, EncoderState<'a, O>>> {
-        self.recurse()?;
-        match self.state.schema {
-            &Schema::Seq(SeqSchema {
-                len: need_len,
-                inner: ref inner_schema
-            }) => {
-                if let Some(need_len) = need_len {
-                    ensure!(
-                        need_len == len,
-                        "schema non-comformance, need seq len {}, got {}",
-                        need_len,
-                        len,
-                    );
-                } else {
-                    write_var_len_uint(&mut self.write, len as _)?;
-                }
-                Ok(SeqEncoder {
-                    state: SeqEncoderState {
-                        len,
-                        inner_schema,
-                        outer: self.state,
-                        count: 0,
+    /// Begin encoding a tuple. This should be followed by encoding the
+    /// elements with `begin_tuple_elem` followed by a call to `finish_tuple`.
+    pub fn begin_tuple(&mut self) -> Result<&mut Self> {
+        validate_need_encode_matches!(
+            self,
+            &Schema::Tuple(_) => (),
+            "encode tuple"
+        );
+        self.top().api_state =
+            ApiState::TupleInProg {
+                next_need: 0,
+            };
+        Ok(self)
+    }
+
+    /// Begin encoding an element in a tuple. This should be followed by
+    /// encoding the inner value. See `begin_tuple`,
+    pub fn begin_tuple_elem(&mut self) -> Result<&mut Self> {
+        let (schema, next_need) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::TupleInProg {
+                        ref mut next_need,
                     },
-                    write: self.write,
-                })
-            },
-            need => Err(error!(
-                "schema non-comformance, need {:?}, got Seq",
-                need,
-            )),
-        }
+                } => (schema, next_need),
+                "tuple elem"
+            );
+        let inner_schema =
+            match_or_unreachable!(
+                schema,
+                &Schema::Tuple(ref inners) => inners
+            )
+            .get(*next_need)
+            .ok_or_else(|| error!(
+                "schema non-comformance, begin tuple elem at idx {}, but that is the tuple's len",
+                *next_need,
+            ))?;
+        *next_need += 1;
+        self.push_need_encode(inner_schema)?;
+        Ok(self)
     }
 
-    pub fn begin_tuple(mut self) -> Result<TupleEncoder<'a, W, EncoderState<'a, O>>> {
-        self.recurse()?;
-        match self.state.schema {
-            &Schema::Tuple(ref inner_schemas) => Ok(TupleEncoder {
-                state: TupleEncoderState {
-                    inner_schemas,
-                    outer: self.state,
-                    count: 0,
-                },
-                write: self.write,
-            }),
-            need => Err(error!(
-                "schema non-comformance, need {:?}, got Tuple",
-                need,
-            )),
-        }
-    }
-
-    pub fn begin_struct(mut self) -> Result<StructEncoder<'a, W, EncoderState<'a, O>>> {
-        self.recurse()?;
-        match self.state.schema {
-            &Schema::Struct(ref fields) => Ok(StructEncoder {
-                state: StructEncoderState {
-                    fields,
-                    outer: self.state,
-                    count: 0,
-                },
-                write: self.write,
-            }),
-            need => Err(error!(
-                "schema non-comformance, need {:?}, got Tuple",
-                need,
-            )),
-        }
-    }
-
-    pub fn begin_enum(
-        mut self,
-        variant_ord: usize,
-        variant_name: &str,
-    ) -> Result<Encoder<'a, W, EncoderState<'a, O>>> {
-        self.recurse()?;
-        match self.state.schema {
-            &Schema::Enum(ref variants) => {
-                ensure!(
-                    variant_ord < variants.len(),
-                    "schema non-comformance, only {} variants, but got variant ordinal {}",
-                    variants.len(),
-                    variant_ord,
-                );
-                let &EnumSchemaVariant {
-                    name: ref need_name,
-                    inner: ref inner_schema,
-                } = &variants[variant_ord];
-                ensure!(
-                    variant_name == need_name,
-                    "schema non-comformance, variant is named {:?}, but got name {:?}",
-                    need_name,
-                    variant_name,
-                );
-                write_ord(&mut self.write, variant_ord, variants.len())?;
-                Ok(Encoder {
-                    state: EncoderState {
-                        schema: inner_schema,
-                        outer: self.state,
+    /// Finish encoding a tuple. See `begin_tuple`.
+    pub fn finish_tuple(&mut self) -> Result<&mut Self> {
+        let (schema, next_need) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::TupleInProg {
+                        next_need,
                     },
-                    write: self.write,
-                })
-            },
-            need => Err(error!(
-                "schema non-comformance, need {:?}, got Enum",
-                need,
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SeqEncoderState<'a, O> {
-    len: usize,
-    inner_schema: &'a Schema,
-    outer: O,
-    count: usize,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for SeqEncoderState<'a, O> {
-    type Encoder = SeqEncoder<'a, W, O>;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        SeqEncoder {
-            state: self,
-            write,
-        }
-    }
-
-    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
-        self.outer.recurse_schema(n)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SeqEncoder<'a, W, O> {
-    state: SeqEncoderState<'a, O>,
-    write: W,
-}
-
-impl<'a, W: Write, O: Outer<'a, W>> SeqEncoder<'a, W, O> {
-    pub fn begin_elem(mut self) -> Result<Encoder<'a, W, SeqEncoderState<'a, O>>> {
+                } => (schema, next_need),
+                "tuple finish"
+            );
+        let inners = 
+            match_or_unreachable!(
+                schema,
+                &Schema::Tuple(ref inners) => inners
+            );
         ensure!(
-            self.state.count < self.state.len,
-            "too many SeqEncoder::begin_elem calls, promised exactly {}",
-            self.state.len,
+            inners.len() == next_need,
+            "schema non-comformance, finish tuple of len {}, but only encoded {} elems",
+            inners.len(),
+            next_need,
         );
-        self.state.count += 1;
-
-        Ok(Encoder {
-            state: EncoderState {
-                schema: self.state.inner_schema,
-                outer: self.state,
-            },
-            write: self.write,
-        })
+        self.pop();
+        Ok(self)
     }
 
-    pub fn finish(self) -> Result<O::Encoder> {
-        ensure!(
-            self.state.count == self.state.len,
-            "not enough SeqEncoder::begin_elem calls, promised exactly {} but provided {}",
-            self.state.len,
-            self.state.count,
+    /// Begin encoding a struct. This should be followed by encoding the
+    /// fields with `begin_struct_field` followed by a call to `finish_struct`.
+    pub fn begin_struct(&mut self) -> Result<&mut Self> {
+        validate_need_encode_matches!(
+            self,
+            &Schema::Struct(_) => (),
+            "encode struct"
         );
-        Ok(self.state.outer.encoder(self.write))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TupleEncoderState<'a, O> {
-    inner_schemas: &'a [Schema],
-    outer: O,
-    count: usize,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for TupleEncoderState<'a, O> {
-    type Encoder = TupleEncoder<'a, W, O>;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        TupleEncoder {
-            state: self,
-            write,
-        }
+        self.top().api_state =
+            ApiState::StructInProg {
+                next_need: 0,
+            };
+        Ok(self)
     }
 
-    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
-        self.outer.recurse_schema(n)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TupleEncoder<'a, W, O> {
-    state: TupleEncoderState<'a, O>,
-    write: W,
-}
-
-impl<'a, W: Write, O: Outer<'a, W>> TupleEncoder<'a, W, O> {
-    pub fn begin_elem(mut self) -> Result<Encoder<'a, W, TupleEncoderState<'a, O>>> {
+    /// Begin encoding a field in a struct. This should be followed by
+    /// encoding the inner value. See `begin_struct`,
+    pub fn begin_struct_field(&mut self, name: &str) -> Result<&mut Self> {
+        let (schema, next_need) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::StructInProg {
+                        ref mut next_need,
+                    },
+                } => (schema, next_need),
+                "struct field"
+            );
+        let field =
+            match_or_unreachable!(
+                schema,
+                &Schema::Struct(ref fields) => fields
+            )
+            .get(*next_need)
+            .ok_or_else(|| error!(
+                "schema non-comformance, begin struct field at idx {}, but that is the struct's len",
+                *next_need,
+            ))?;
         ensure!(
-            self.state.count < self.state.inner_schemas.len(),
-            "too many TupleEncoder::begin_elem calls, no additional elements expected",
-        );
-        let inner_schema = &self.state.inner_schemas[self.state.count];
-        self.state.count += 1;
-
-        Ok(Encoder {
-            state: EncoderState {
-                schema: inner_schema,
-                outer: self.state,
-            },
-            write: self.write,
-        })
-    }
-
-    pub fn finish(self) -> Result<O::Encoder> {
-        ensure!(
-            self.state.count == self.state.inner_schemas.len(),
-            "not enough Tuple::begin_elem calls, expected additional elements: {:?}",
-            &self.state.inner_schemas[self.state.count..],
-        );
-        Ok(self.state.outer.encoder(self.write))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StructEncoderState<'a, O> {
-    fields: &'a [StructSchemaField],
-    outer: O,
-    count: usize,
-}
-
-impl<'a, W, O: Outer<'a, W>> Outer<'a, W> for StructEncoderState<'a, O> {
-    type Encoder = StructEncoder<'a, W, O>;
-
-    fn encoder(self, write: W) -> Self::Encoder {
-        StructEncoder {
-            state: self,
-            write,
-        }
-    }
-
-    fn recurse_schema(&self, n: usize) -> Option<&'a Schema> {
-        self.outer.recurse_schema(n)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StructEncoder<'a, W, O> {
-    state: StructEncoderState<'a, O>,
-    write: W,
-}
-
-impl<'a, W: Write, O: Outer<'a, W>> StructEncoder<'a, W, O> {
-    pub fn begin_field(mut self, name: &str) -> Result<Encoder<'a, W, StructEncoderState<'a, O>>> {
-        ensure!(
-            self.state.count < self.state.fields.len(),
-            "too many begin_field calls, no additional fields expected",
-        );
-        let &StructSchemaField {
-            name: ref need_name,
-            inner: ref inner_schema,
-        } = &self.state.fields[self.state.count];
-        ensure!(
-            need_name == name,
-            "schema non-comformance, need field {:?}, got field {:?}",
-            need_name,
+            &field.name == name,
+            "schema non-comformance, need struct field {:?}, got struct field {:?}",
+            field.name,
             name,
         );
-        self.state.count += 1;
-
-        Ok(Encoder {
-            state: EncoderState {
-                schema: inner_schema,
-                outer: self.state,
-            },
-            write: self.write,
-        })
+        *next_need += 1;
+        self.push_need_encode(&field.inner)?;
+        Ok(self)
     }
 
-    pub fn finish(self) -> Result<O::Encoder> {
+    /// Finish encoding a struct. See `begin_struct`.
+    pub fn finish_struct(&mut self) -> Result<&mut Self> {
+        let (schema, next_need) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::StructInProg {
+                        next_need,
+                    },
+                } => (schema, next_need),
+                "struct finish"
+            );
+        let fields = 
+            match_or_unreachable!(
+                schema,
+                &Schema::Struct(ref fields) => fields
+            );
         ensure!(
-            self.state.count == self.state.fields.len(),
-            "not enough begin_field calls, expected additional fields: {:?}",
-            &self.state.fields[self.state.count..],
+            fields.len() == next_need,
+            "schema non-comformance, finish struct of len {}, but only encoded {} elems",
+            fields.len(),
+            next_need,
         );
-        Ok(self.state.outer.encoder(self.write))
+        self.pop();
+        Ok(self)
+    }
+
+    /// Begin encoding a variant for an enum schema. This should be followed by
+    /// encodnig the inner value, after which the enum will auto-finish.
+    pub fn begin_enum(
+        &mut self,
+        variant_ord: usize,
+        variant_name: &str,
+    ) -> Result<&mut Self> {
+        let variants =
+            validate_need_encode_matches!(
+                self,
+                &Schema::Enum(ref variants) => variants,
+                "encode enum"
+            );
+        let variant = variants
+            .get(variant_ord)
+            .ok_or_else(|| error!(
+                "schema non-comformance, begin enum with variant ordinal {}, but enum only has {} variants",
+                variant_ord,
+                variants.len(),
+            ))?;
+        ensure!(
+            variant_name == &variant.name,
+            "schema non-comformance, begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
+            variant_name,
+            variant.name,
+        );
+        write_ord(&mut self.0.write, variant_ord, variants.len())?;
+        self.top().api_state = ApiState::AutoFinishInProg;
+        self.push_need_encode(&variant.inner)?;
+        Ok(self)
     }
 }
-*/
