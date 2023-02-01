@@ -1,3 +1,6 @@
+//! Dynamic representation of data within the serialized data model, analogous
+//! to `serde_json::Value`.
+
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {

@@ -1,3 +1,5 @@
+//! Handling of variable-length integer logic.
+
 
 use crate::error::*;
 use std::io::{

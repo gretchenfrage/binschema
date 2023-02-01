@@ -1,3 +1,6 @@
+//! Trait for types which statically tell you the schema by which they'll
+//! serde, and implementations for common types.
+
 
 use crate::schema::*;
 use std::{

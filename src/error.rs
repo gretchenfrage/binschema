@@ -1,3 +1,5 @@
+//! Error handling utilities.
+
 
 #[macro_export]
 macro_rules! error {
@@ -10,13 +12,19 @@ macro_rules! error {
 }
 
 #[macro_export]
+macro_rules! bail {
+    ($($e:tt)*)=>{ return Err(error!($($e)*)) };
+}
+
+#[macro_export]
 macro_rules! ensure {
     ($c:expr, $($e:tt)*)=>{
         if !$c {
-            return Err(error!($($e)*));
+            bail!($($e)*);
         }
     };
 }
 
 pub use error;
+pub use bail;
 pub use ensure;

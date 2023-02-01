@@ -1,3 +1,6 @@
+//! Data types for representing a schema, and the macro for constructing them
+//! with syntactic sugar.
+
 
 /// Description of how raw binary data encodes less ambiguous structures of
 /// semantic primitives.

@@ -1,6 +1,8 @@
+//! Encoder.
 
 
 use crate::{
+    error::*,
     schema::*,
     var_len::{
         write_var_len_uint,
@@ -11,36 +13,11 @@ use crate::{
 use std::{
     io::{
         Write,
-        Error,
-        ErrorKind,
         Result,
     },
     mem::forget,
     fmt::{self, Formatter, Debug},
 };
-
-macro_rules! error {
-    ($($e:tt)*)=>{
-        Error::new(
-            ErrorKind::Other,
-            format!($($e)*),
-        )
-    };
-}
-
-macro_rules! bail {
-    ($($e:tt)*)=>{
-        return Err(error!($($e)*))
-    };
-}
-
-macro_rules! ensure {
-    ($c:expr, $($e:tt)*)=>{
-        if !$c {
-            bail!($($e)*);
-        }
-    };
-}
 
 #[derive(Debug)]
 pub struct EncoderStateAlloc {
