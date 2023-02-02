@@ -1,10 +1,30 @@
 
 pub mod schema;
-pub mod error;
-pub mod serde_schema;
-pub mod var_len;
-pub mod encoder;
 pub mod value;
+
+mod error;
+mod serde_schema;
+mod var_len;
+mod coder;
+mod encoder;
+mod decoder;
+
+pub use crate::{
+    schema::{
+        Schema,
+        ScalarType,
+        SeqSchema,
+        StructSchemaField,
+        EnumSchemaVariant,
+    },
+    coder::{
+        coder::CoderState,
+        coder_alloc::CoderStateAlloc,
+    },
+    encoder::Encoder,
+    decoder::Decoder,
+};
+
 
 #[test]
 fn test() -> std::io::Result<()> {

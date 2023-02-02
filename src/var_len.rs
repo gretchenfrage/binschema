@@ -47,7 +47,7 @@ pub fn read_ord<R>(
 where
     R: Read,
 {
-    ensure!(num_variants > 0, "malformed data: presence of uninhabited enum");
+    ensure!(num_variants > 0, "malformed data, presence of uninhabited enum");
     let mut all_bytes = [0; 8];
     let byte_len = ord_byte_len(num_variants - 1);
     let used_bytes = &mut all_bytes[..byte_len];
@@ -55,10 +55,13 @@ where
     let ord = u64::from_le_bytes(all_bytes);
     ensure!(
         ord < num_variants as u64,
-        "malformed data: enum ordinal {} out of range 0..{}",
+        "malformed data, enum ordinal {} out of range 0..{}",
         ord,
         num_variants,
     );
+    // we know ord to be a valid usize, because it is less than num_variants,
+    // which we get by getting the length of the enum vector, thus making it
+    // valid usize
     Ok(ord as usize)
 }
 
