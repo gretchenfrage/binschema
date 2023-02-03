@@ -3,6 +3,7 @@ use crate::coder::coder::StackFrame;
 use std::mem::forget;
 
 
+/// Reusable allocation for `CoderState`.
 #[derive(Debug)]
 pub struct CoderStateAlloc {
     ptr: *mut (),

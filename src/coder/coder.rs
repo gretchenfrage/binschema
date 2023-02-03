@@ -1,5 +1,6 @@
 
 use crate::{
+    do_if_err::DoIfErr,
     error::{
         error,
         ensure,
@@ -7,6 +8,7 @@ use crate::{
     },
     schema::{
         Schema,
+        SeqSchema,
         schema,
     },
     coder::coder_alloc::CoderStateAlloc,
@@ -14,9 +16,12 @@ use crate::{
 use std::io::Result;
 
 
+/// Used to construct an (en/de)coder, and ensures that some schema is being
+/// validly (en/de)coded.
 #[derive(Debug, Clone)]
 pub struct CoderState<'a> {
     stack: Vec<StackFrame<'a>>,
+    broken: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,10 +39,13 @@ enum ApiState {
     /// element is sufficient for this element to be considered finished
     /// encoding.
     AutoFinish,
+    /// An option is being coded, but its someness is uninitialized.
+    OptionUninitSomeness,
+    /// A sequence is being coded, but its length is uninitialized.
+    SeqUninitLen,
     /// A sequence is being coded. The corresponding `schema` must be a
     /// `Schema::Seq`.
     Seq {
-        /// Total number of elements needing to be coded.
         len: usize,
         /// Next element index would code.
         next: usize,
@@ -54,9 +62,13 @@ enum ApiState {
         /// Next field index would code.
         next: usize,
     },
-    /// An enum is being coded, but the variant has not yet been coded. The
-    /// corresponding `schema` must be a `schema::Enum`.
-    Enum,
+    /// An enum is being coded. The corresponding `schema` must be a 
+    /// `schema::Enum`.
+    Enum {
+        /// If None, neither the variant ord or name have been coded. If Some,
+        /// that variant ord has been coded, but the variant name has not.
+        variant_ord: Option<usize>,
+    }
 }
 
 impl<'a> CoderState<'a> {
@@ -69,18 +81,24 @@ impl<'a> CoderState<'a> {
             schema,
             api_state: ApiState::Need,
         });
-        CoderState { stack }
+        CoderState {
+            stack,
+            broken: false
+        }
     }
 
     pub fn is_finished(&self) -> bool {
-        self.stack.is_empty()
+        self.stack.is_empty() && !self.broken
     }
 
     pub fn is_finished_or_err(&self) -> Result<()> {
         if self.is_finished() {
             Ok(())
         } else {
-            Err(error!("API usage error, didn't finish coding"))
+            Err(error!(
+                "API usage error, didn't finish coding, broken = {}",
+                self.broken,
+            ))
         }
     }
 
@@ -91,13 +109,19 @@ impl<'a> CoderState<'a> {
 }
 
 macro_rules! validate_top {
-    ($self:ident, |$top:ident| $opt_ret:expr, $got:expr)=>{
+    ($self:ident, |$top:ident| $opt_ret:expr, $got:expr)=>{{
+        ensure!(
+            !$self.broken,
+            "API usage error, usage after IO error"
+        );
         match $self.stack.iter_mut().rev().next() {
             None => bail!("API usage error, usage of finished coder"),
             Some($top) => match $opt_ret {
                 Some(ret) => ret,
                 None => match &$top.api_state {
                     &ApiState::AutoFinish => unreachable!(),
+                    &ApiState::OptionUninitSomeness => unreachable!(),
+                    &ApiState::SeqUninitLen => unreachable!(),
                     &ApiState::Need => bail!(
                         "schema non-comformance, need {:?}, got {}",
                         $top.schema,
@@ -115,14 +139,18 @@ macro_rules! validate_top {
                         "API usage error, need struct field/finish, got {}",
                         $got,
                     ),
-                    &ApiState::Enum => bail!(
-                        "API usage error, need enum variant, got {}",
+                    &ApiState::Enum { variant_ord: None } => bail!(
+                        "API usage error, need enum variant ord, got {}",
+                        $got,
+                    ),
+                    &ApiState::Enum { variant_ord: Some(_) } => bail!(
+                        "API usage error, need enum variant name, got {}",
                         $got,
                     ),
                 },
             }
         }
-    };
+    }};
 }
 
 macro_rules! validate_top_matches {
@@ -179,7 +207,7 @@ macro_rules! match_or_unreachable {
 
 macro_rules! code_simple {
     ($($m:ident($($t:tt)*),)*)=>{$(
-        pub fn $m(&mut self) -> Result<()> {
+        pub(crate) fn $m(&mut self) -> Result<()> {
             validate_need_eq!(self, schema!($($t)*));
             self.pop();
             Ok(())
@@ -196,13 +224,14 @@ impl<'a> CoderState<'a> {
     fn push_need(&mut self, mut schema: &'a Schema) -> Result<()> {
         let mut i = self.stack.len();
         while let &Schema::Recurse(n) = schema {
-            ensure!(
-                n > 0,
-                "invalid schema: recurse of level 0"
-            );
+            if n == 0 {
+                self.broken = true;
+                bail!("invalid schema, recurse of level 0");
+            }
             i = i
                 .checked_sub(n)
-                .ok_or_else(|| error!("invalid schema: recurse past base of stack"))?;
+                .ok_or_else(|| error!("invalid schema, recurse past base of stack"))
+                .do_if_err(|| self.broken = true)?;
             schema = self.stack[i].schema;
         }
         self.stack.push(StackFrame {
@@ -220,6 +249,12 @@ impl<'a> CoderState<'a> {
         ) {
             self.stack.pop().unwrap();
         }
+    }
+
+    /// Mark the coder as having experienced an irrecoverable error. Any
+    /// further attempts at coding is an API usage error.
+    pub(crate) fn mark_broken(&mut self) {
+        self.broken = true;
     }
 
     code_simple!(
@@ -242,13 +277,182 @@ impl<'a> CoderState<'a> {
         code_bytes(bytes),
     );
 
+    /// Begin coding an option. If successful, this must be immediately
+    /// followed with `set_option_none` or `set_option_some`, or unspecified
+    /// behavior occurs. If following with `set_option_none`, that immediately
+    /// finishes the option. If following with `set_option_some`, that must
+    /// in turn be followed with coding the inner value, which then
+    /// auto-finishes the option.
+    pub(crate) fn begin_option(&mut self) -> Result<()> {
+        validate_need_matches!(
+            self,
+            &Schema::Option(_) => (),
+            "option begin"
+        );
+        self.top().api_state = ApiState::OptionUninitSomeness;
+        Ok(())
+    }
+
+    /// Make the option be encoded as none. This must be immediately following
+    /// a successful call to `begin_option`, or unspecified behavior occurs.
+    /// See `begin_option`.
+    pub(crate) fn set_option_none(&mut self) {
+        debug_assert!(matches!(
+            self.stack.iter().rev().next(),
+            Some(&StackFrame {
+                api_state: ApiState::OptionUninitSomeness,
+                ..
+            }),
+        ));
+        self.pop();
+    }
+
+    /// Make the option be encoded as some. This must be immediately following
+    /// a successful call to `begin_option`, or unspecified behavior occurs.
+    /// See `begin_option`.
+    pub(crate) fn set_option_some(&mut self) -> Result<()> {
+        debug_assert!(matches!(
+            self.stack.iter().rev().next(),
+            Some(&StackFrame {
+                api_state: ApiState::OptionUninitSomeness,
+                ..
+            }),
+        ));
+        let inner =
+            match_or_unreachable!(
+                self.top(),
+                &mut StackFrame {
+                    schema: &Schema::Option(ref inner),
+                    ..
+                } => inner
+            );
+        self.top().api_state = ApiState::AutoFinish;
+        self.push_need(inner)?;
+        Ok(())
+    }
+
+    /// Begin coding a fixed len seq. This should be followed by coding `len`
+    /// elements with `begin_seq_elem`, then by `finish_seq`.
+    pub(crate) fn begin_fixed_len_seq(&mut self, len: usize) -> Result<()> {
+        let fixed_len =
+            validate_need_matches!(
+                self,
+                &Schema::Seq(SeqSchema {
+                    len: Some(fixed_len),
+                    ..
+                }) => fixed_len,
+                "fixed len seq begin"
+            );
+        ensure!(
+            fixed_len == len,
+            "schema non-comformance, need seq len {}, got seq len {}",
+            fixed_len,
+            len
+        );
+        self.top().api_state =
+            ApiState::Seq {
+                len,
+                next: 0,
+            };
+        Ok(())
+    }
+
+    /// Begin coding a var len seq. If successful, this must be immediately
+    /// followed with `set_var_len_seq_len`, or unspecified behavior occurs.
+    /// Then, that many elements should be coded with `begin_seq_elem`, then
+    /// `finish_seq`.
+    pub(crate) fn begin_var_len_seq(&mut self) -> Result<()> {
+        validate_need_matches!(
+            self,
+            &Schema::Seq(SeqSchema {
+                len: None,
+                ..
+            }) => (),
+            "var len seq begin"
+        );
+        self.top().api_state = ApiState::SeqUninitLen;
+        Ok(())
+    }
+
+    /// Provide the length of a var len seq. See `begin_var_len_seq`. This must
+    /// immediately follow a successful call to `begin_var_len_seq`, or
+    /// unspecified behavior occurs. See `begin_var_len_seq`.
+    pub(crate) fn set_var_len_seq_len(&mut self, len: usize) {
+        debug_assert!(matches!(
+            self.stack.iter().rev().next(),
+            Some(&StackFrame {
+                api_state: ApiState::SeqUninitLen,
+                ..
+            }),
+        ));
+        self.top().api_state =
+            ApiState::Seq {
+                len,
+                next: 0,
+            };
+    }
+
+    /// Begin encoding an element in a seq. This should be followed by encoding
+    /// the inner value. See `begin_seq`,
+    pub(crate) fn begin_seq_elem(&mut self) -> Result<()> {
+        let (schema, len, next) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::Seq {
+                        len,
+                        ref mut next,
+                    },
+                } => (schema, len, next),
+                "seq elem"
+            );
+        ensure!(
+            *next < len,
+            "API usage error, begin seq elem at idx {}, but that is seq's declared len",
+            *next
+        );
+        *next += 1;
+        self
+            .push_need(match_or_unreachable!(
+                schema,
+                &Schema::Seq(SeqSchema { ref inner, .. }) => &**inner
+            ))?;
+        Ok(())
+    }
+
+    /// Finish encoding a seq. See `begin_seq`.
+    pub(crate) fn finish_seq(&mut self) -> Result<()> {
+        let (len, next) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    api_state: ApiState::Seq {
+                        len,
+                        next,
+                    },
+                    ..
+                } => (len, next),
+                "seq finish"
+            );
+        debug_assert!(len <= next);
+        ensure!(
+            len == next,
+            "API usage error, finish seq of declared len {}, but only coded {} elems",
+            len,
+            next
+        );
+        self.pop();
+        Ok(())
+    }
+
     /// Begin coding a tuple. This should be followed by coding the
     /// elements with `begin_tuple_elem` followed by a call to `finish_tuple`.
-    pub fn begin_tuple(&mut self) -> Result<()> {
+    pub(crate) fn begin_tuple(&mut self) -> Result<()> {
         validate_need_matches!(
             self,
             &Schema::Tuple(_) => (),
-            "code tuple"
+            "tuple begin"
         );
         self.top().api_state =
             ApiState::Tuple {
@@ -259,7 +463,7 @@ impl<'a> CoderState<'a> {
 
     /// Begin coding an element in a tuple. This should be followed by
     /// coding the inner value. See `begin_tuple`,
-    pub fn begin_tuple_elem(&mut self) -> Result<()> {
+    pub(crate) fn begin_tuple_elem(&mut self) -> Result<()> {
         let (schema, next) =
             validate_top_matches!(
                 self,
@@ -287,7 +491,7 @@ impl<'a> CoderState<'a> {
     }
 
     /// Finish coding a tuple. See `begin_tuple`.
-    pub fn finish_tuple(&mut self) -> Result<()> {
+    pub(crate) fn finish_tuple(&mut self) -> Result<()> {
         let (schema, next) =
             validate_top_matches!(
                 self,
@@ -316,11 +520,11 @@ impl<'a> CoderState<'a> {
 
     /// Begin coding a struct. This should be followed by coding the
     /// fields with `begin_struct_field` followed by a call to `finish_struct`.
-    pub fn begin_struct(&mut self) -> Result<()> {
+    pub(crate) fn begin_struct(&mut self) -> Result<()> {
         validate_need_matches!(
             self,
             &Schema::Struct(_) => (),
-            "code struct"
+            "struct begin"
         );
         self.top().api_state =
             ApiState::Struct {
@@ -331,7 +535,7 @@ impl<'a> CoderState<'a> {
 
     /// Begin coding a field in a struct. This should be followed by
     /// coding the inner value. See `begin_struct`,
-    pub fn begin_struct_field(&mut self, name: &str) -> Result<()> {
+    pub(crate) fn begin_struct_field(&mut self, name: &str) -> Result<()> {
         let (schema, next) =
             validate_top_matches!(
                 self,
@@ -365,7 +569,7 @@ impl<'a> CoderState<'a> {
     }
 
     /// Finish coding a struct. See `begin_struct`.
-    pub fn finish_struct(&mut self) -> Result<()> {
+    pub(crate) fn finish_struct(&mut self) -> Result<()> {
         let (schema, next) =
             validate_top_matches!(
                 self,
@@ -392,111 +596,105 @@ impl<'a> CoderState<'a> {
         Ok(())
     }
 
-    /// Begin coding an enum. This should be followed by `begin_enum_variant`
-    /// followed by coding the inner value, which then auto-finishes the
-    /// enum. Returns number of variants.
-    pub fn begin_enum(&mut self) -> Result<usize> {
+    /// Begin coding an enum. Returns the number of variants.
+    /// 
+    /// This should be followed by:
+    ///
+    /// - `begin_enum_variant_ord`
+    /// - `begin_enum_variant_name`
+    /// - encoding the inner value
+    ///
+    /// Which then auto-finishes the enum. At any point after successfully
+    /// calling this method and before successfully calling
+    /// `begin_enum_variant_name` one may call `cancel_enum` to restore the
+    /// state preceeding the initial call to `begin_enum`.
+    pub(crate) fn begin_enum(&mut self) -> Result<usize> {
         let num_variants =
             validate_need_matches!(
                 self,
                 &Schema::Enum(ref variants) => variants.len(),
                 "code enum"
             );
-        self.top().api_state = ApiState::Enum;
+        self.top().api_state = ApiState::Enum { variant_ord: None };
         Ok(num_variants)
     }
 
-    /// Begin coding an enum variant. See `begin_enum`. Returns number of
-    /// variants.
-    pub fn begin_enum_variant(
+    /// Provide the variant ordinal of an enum. See `begin_enum`.
+    pub(crate) fn begin_enum_variant_ord(
         &mut self,
         variant_ord: usize,
-        variant_name: &str,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         let schema =
             validate_top_matches!(
                 self,
                 &mut StackFrame {
                     schema,
-                    api_state: ApiState::Enum,
+                    api_state: ApiState::Enum { variant_ord: None },
                 } => schema,
-                "enum variant"
+                "enum variant ord"
+            );
+        let num_variants =
+            match_or_unreachable!(
+                schema,
+                &Schema::Enum(ref variants) => variants.len()
+            );
+        // TODO: when decoding, this is a malformed data error, not a schema
+        //       non-conformance error
+        ensure!(
+            variant_ord < num_variants,
+            "schema non-comformance, begin enum with variant ordinal {}, but enum only has {} variants",
+            variant_ord,
+            num_variants
+        );
+        self.top().api_state =
+            ApiState::Enum { variant_ord: Some(variant_ord) };
+        Ok(())
+    }
+
+    /// Provide the variant name of an enum. See `begin_enum`.
+    pub(crate) fn begin_enum_variant_name(
+        &mut self,
+        variant_name: &str,
+    ) -> Result<()> {
+        let (schema, variant_ord) =
+            validate_top_matches!(
+                self,
+                &mut StackFrame {
+                    schema,
+                    api_state: ApiState::Enum {
+                        variant_ord: Some(variant_ord),
+                    },
+                } => (schema, variant_ord),
+                "enum variant name"
             );
         let variants =
             match_or_unreachable!(
                 schema,
                 &Schema::Enum(ref variants) => variants
             );
-        let variant = variants
-            .get(variant_ord)
-            .ok_or_else(|| error!(
-                "schema non-comformance, begin enum with variant ordinal {}, but enum only has {} variants",
-                variant_ord,
-                variants.len(),
-            ))?;
+        let need_variant_name = &variants[variant_ord].name;
         ensure!(
-            variant_name == &variant.name,
+            variant_name == need_variant_name,
             "schema non-comformance, begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
             variant_name,
-            variant.name,
+            need_variant_name,
         );
         self.top().api_state = ApiState::AutoFinish;
-        self.push_need(&variant.inner)?;
-        Ok(variants.len())
-    }
-
-    /*
-    /// Completely code a None value for an Option schema.
-    pub fn code_none(&mut self) -> Result<()> {
-        validate_need_matches!(
-            self,
-            &Schema::Option(_) => (),
-            "code option"
-        );
-        self.pop();
         Ok(())
     }
 
-    /// Begin coding a Some value for an Option schema. This should be
-    /// followed by coding the inner value, which will auto-finish coding
-    /// the Option.
-    pub fn begin_some(&mut self) -> Result<()> {
-        let inner =
-            validate_need_matches!(
-                self,
-                &Schema::Option(ref inner) => inner,
-                "code option"
-            );
-        self.top().api_state = ApiState::AutoFinish;
-        self.push_need(inner)?;
-        Ok(())
+    /// Cancel an enum. Must only be called after a successful call to
+    /// `begin_enum` and before a successful call to
+    /// `begin_enum_variant_name`, or unspecified behavior occurs.
+    /// See `begin_enum`.
+    pub(crate) fn cancel_enum(&mut self) {
+        debug_assert!(matches!(
+            self.stack.iter().rev().next(),
+            Some(&StackFrame {
+                api_state: ApiState::Enum { .. },
+                ..
+            }),
+        ));
+        self.top().api_state = ApiState::Need;
     }
-
-    /// Begin coding a seq. This should be followed by coding the elements
-    /// with `begin_seq_elem` followed by a call to `finish_seq`.
-    pub fn begin_seq(&mut self, len: usize) -> Result<()> {
-        let need_len =
-            validate_need_encode_matches!(
-                self,
-                &Schema::Seq(SeqSchema { len, .. }) => len,
-                "encode seq"
-            );
-        if let Some(need_len) = need_len {
-            ensure!(
-                need_len == len,
-                "schema non-comformance, need seq len {}, got seq len {}",
-                need_len,
-                len
-            );
-        } else {
-            write_var_len_uint(&mut self.0.write, len as u128)?;
-        }
-        self.top().api_state =
-            ApiState::Seq {
-                declared_len: len,
-                encoded_len: 0,
-            };
-        Ok(self)
-    }
-    */
 }

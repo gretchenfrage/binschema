@@ -1,7 +1,6 @@
 //! Error handling utilities.
 
 
-#[macro_export]
 macro_rules! error {
     ($($e:tt)*)=>{
         ::std::io::Error::new(
@@ -11,12 +10,10 @@ macro_rules! error {
     };
 }
 
-#[macro_export]
 macro_rules! bail {
     ($($e:tt)*)=>{ return Err(error!($($e)*)) };
 }
 
-#[macro_export]
 macro_rules! ensure {
     ($c:expr, $($e:tt)*)=>{
         if !$c {
@@ -25,6 +22,6 @@ macro_rules! ensure {
     };
 }
 
-pub use error;
-pub use bail;
-pub use ensure;
+pub(crate) use error;
+pub(crate) use bail;
+pub(crate) use ensure;

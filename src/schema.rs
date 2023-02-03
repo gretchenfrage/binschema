@@ -2,58 +2,27 @@
 //! with syntactic sugar.
 
 
-/// Description of how raw binary data encodes less ambiguous structures of
+/// Description of how raw binary data encodes less tedious structures of
 /// semantic primitives.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Schema {
-    /// A scalar data type, encoded little-endian.
+    /// Some scalar data type.
     Scalar(ScalarType),
-    /// A string (of characters).
-    ///
-    /// Encoded as:
-    /// - u64 length
-    /// - length bytes of UTF-8 data
-    CharString,
-    /// A binary string.
-    ///
-    /// Encoded as:
-    /// - u64 length
-    /// - length bytes of data
-    ByteString,
-    /// Unitary data type. Encoded as nothing.
+    /// Utf8 string.
+    Str,
+    /// Byte string.
+    Bytes,
+    /// Unit (0 bytes).
     Unit,
-    /// Option data type.
-    ///
-    /// Encoded as:
-    /// - bool is_some
-    /// - if is_some:
-    ///     - inner data
+    /// Option (some or none).
     Option(Box<Schema>),
     /// Homogenous sequence. May be fixed or variable length.
-    ///
-    /// Encoded as:
-    /// - if schema.len is none:
-    ///     - u64 length
-    /// - repeating length times:
-    ///     - inner data
     Seq(SeqSchema),
     /// Heterogenous fixed-length sequence.
-    ///
-    /// Encoded as:
-    /// - for each item:
-    ///     - inner data
     Tuple(Vec<Schema>),
-    /// Struct of fields with both names and ordinals.
-    ///
-    /// Encoded as:
-    /// - for each field:
-    ///     - inner data
+    /// Sequence fields with names and ordinals.
     Struct(Vec<StructSchemaField>),
-    /// Tagged union of variants with both names and ordinals.
-    ///
-    /// Encoded as:
-    /// - u64 ordinal of variant
-    /// - inner data
+    /// Tagged union of variants with names and ordinals.
     Enum(Vec<EnumSchemaVariant>),
     /// Recurse type. This allows schema to be self-referential.
     ///
@@ -71,14 +40,38 @@ pub enum Schema {
     ///     ("Leaf", Schema::Scalar(ScalarType::I32)).into(),
     /// ]);
     /// ```
+    ///
+    /// `Recurse(0)` would recurse to itself, but it is illegal, as attempting
+    /// to resolve leads to an infinite loop.
     Recurse(usize),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ScalarType {
-    U8, U16, U32, U64, U128,
-    I8, I16, I32, I64, I128,
-    F32, F64,
+    /// Encoded as-is.
+    U8,
+    /// Encoded little-endian.
+    U16,
+    /// Encoded var len.
+    U32,
+    /// Encoded var len.
+    U64,
+    /// Encoded var len.
+    U128,
+    /// Encoded as-is.
+    I8,
+    /// Encoded little-endian.
+    I16,
+    /// Encoded var len.
+    I32,
+    /// Encoded var len.
+    I64,
+    /// Encoded var len.
+    I128,
+    /// Encoded little-endian.
+    F32,
+    /// Encoded little-endian.
+    F64,
     Char,
     /// Encoded as 1 byte, 0 or 1.
     Bool,
@@ -167,34 +160,34 @@ impl<S: Into<String>> From<(S, Schema)> for EnumSchemaVariant {
 ///     }),
 ///     Leaf(i32),
 /// });
-/// let _: Schema = schema!(%Schema::CharString);
+/// let _: Schema = schema!(%Schema::Str);
 /// ```
 #[macro_export]
 macro_rules! schema {
-    (u8)=>{ $crate::Schema::Scalar($crate::ScalarType::U8) };
-    (u16)=>{ $crate::Schema::Scalar($crate::ScalarType::U16) };
-    (u32)=>{ $crate::Schema::Scalar($crate::ScalarType::U32) };
-    (u64)=>{ $crate::Schema::Scalar($crate::ScalarType::U64) };
-    (u128)=>{ $crate::Schema::Scalar($crate::ScalarType::U128) };
-    (i8)=>{ $crate::Schema::Scalar($crate::ScalarType::I8) };
-    (i16)=>{ $crate::Schema::Scalar($crate::ScalarType::I16) };
-    (i32)=>{ $crate::Schema::Scalar($crate::ScalarType::I32) };
-    (i64)=>{ $crate::Schema::Scalar($crate::ScalarType::I64) };
-    (i128)=>{ $crate::Schema::Scalar($crate::ScalarType::I128) };
-    (f32)=>{ $crate::Schema::Scalar($crate::ScalarType::F32) };
-    (f64)=>{ $crate::Schema::Scalar($crate::ScalarType::F64) };
-    (char)=>{ $crate::Schema::Scalar($crate::ScalarType::Char) };
-    (bool)=>{ $crate::Schema::Scalar($crate::ScalarType::Bool) };
-    (str)=>{ $crate::Schema::CharString };
-    (bytes)=>{ $crate::Schema::ByteString };
-    (())=>{ $crate::Schema::Unit };
-    (?($($inner:tt)*))=>{ $crate::Schema::Option(::std::boxed::Box::new($crate::schema!($($inner)*))) };
-    ([$len:expr; $($inner:tt)*])=>{ $crate::Schema::Seq($crate::SeqSchema { len: ::core::option::Option::Some($len), inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
-    ([_; $($inner:tt)*])=>{ $crate::Schema::Seq($crate::SeqSchema { len: ::core::option::Option::None, inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
-    (($(($($item:tt)*)),*$(,)?))=>{ $crate::Schema::Tuple(::std::vec![$( $crate::schema!($($item)*), )*]) };
-    ({ $(($name:ident: $($field:tt)*)),*$(,)? })=>{ $crate::Schema::Struct(::std::vec![$( $crate::StructSchemaField { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($field)*) }, )*]) };
-    (enum { $($name:ident($($variant:tt)*)),*$(,)? })=>{ $crate::Schema::Enum(::std::vec![$( $crate::EnumSchemaVariant { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($variant)*) }, )*]) };
-    (recurse($n:expr))=>{ $crate::Schema::Recurse($n) };
+    (u8)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U8) };
+    (u16)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U16) };
+    (u32)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U32) };
+    (u64)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U64) };
+    (u128)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U128) };
+    (i8)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::I8) };
+    (i16)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::I16) };
+    (i32)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::I32) };
+    (i64)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::I64) };
+    (i128)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::I128) };
+    (f32)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::F32) };
+    (f64)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::F64) };
+    (char)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::Char) };
+    (bool)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::Bool) };
+    (str)=>{ $crate::schema::Schema::Str };
+    (bytes)=>{ $crate::schema::Schema::Bytes };
+    (())=>{ $crate::schema::Schema::Unit };
+    (?($($inner:tt)*))=>{ $crate::schema::Schema::Option(::std::boxed::Box::new($crate::schema!($($inner)*))) };
+    ([$len:expr; $($inner:tt)*])=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::Some($len), inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
+    ([_; $($inner:tt)*])=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::None, inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
+    (($(($($item:tt)*)),*$(,)?))=>{ $crate::schema::Schema::Tuple(::std::vec![$( $crate::schema!($($item)*), )*]) };
+    ({ $(($name:ident: $($field:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Struct(::std::vec![$( $crate::schema::StructSchemaField { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($field)*) }, )*]) };
+    (enum { $($name:ident($($variant:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Enum(::std::vec![$( $crate::schema::EnumSchemaVariant { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($variant)*) }, )*]) };
+    (recurse($n:expr))=>{ $crate::schema::Schema::Recurse($n) };
     (%$schema:expr)=>{ $schema };
 }
 

@@ -1,5 +1,6 @@
 
 use crate::{
+    do_if_err::DoIfErr,
     coder::coder::CoderState,
     var_len::{
         write_var_len_uint,
@@ -13,6 +14,7 @@ use std::io::{
 };
 
 
+/// Encodes a value to a `std::io::Write` comforming to a schema.
 pub struct Encoder<'a, 'b, W> {
     state: &'b mut CoderState<'a>,
     write: &'b mut W,
@@ -38,7 +40,8 @@ macro_rules! encode_var_len_uint {
     ($($m:ident($t:ident) $c:ident,)*)=>{$(
         pub fn $m(&mut self, n: $t) -> Result<&mut Self> {
             self.state.$c()?;
-            write_var_len_uint(&mut self.write, n as u128)?;
+            write_var_len_uint(&mut self.write, n as u128)
+                .do_if_err(|| self.state.mark_broken())?;
             Ok(self)
         }
     )*};
@@ -48,7 +51,8 @@ macro_rules! encode_var_len_sint {
     ($($m:ident($t:ident) $c:ident,)*)=>{$(
         pub fn $m(&mut self, n: $t) -> Result<&mut Self> {
             self.state.$c()?;
-            write_var_len_sint(&mut self.write, n as i128)?;
+            write_var_len_sint(&mut self.write, n as i128)
+                .do_if_err(|| self.state.mark_broken())?;
             Ok(self)
         }
     )*};
@@ -56,7 +60,9 @@ macro_rules! encode_var_len_sint {
 
 impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
     fn write(&mut self, b: &[u8]) -> Result<()> {
-        self.write.write_all(b)
+        self.write
+            .write_all(b)
+            .do_if_err(|| self.state.mark_broken())
     }
 
     encode_le_bytes!(
@@ -99,15 +105,65 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
 
     pub fn encode_str(&mut self, s: &str) -> Result<&mut Self> {
         self.state.code_str()?;
-        write_var_len_uint(&mut self.write, s.len() as u128)?;
+        write_var_len_uint(&mut self.write, s.len() as u128)
+            .do_if_err(|| self.state.mark_broken())?;
         self.write(s.as_bytes())?;
         Ok(self)
     }
 
-    pub fn encode_bytes(&mut self ,s: &[u8]) -> Result<&mut Self> {
+    pub fn encode_bytes(&mut self, s: &[u8]) -> Result<&mut Self> {
         self.state.code_bytes()?;
-        write_var_len_uint(&mut self.write, s.len() as u128)?;
+        write_var_len_uint(&mut self.write, s.len() as u128)
+            .do_if_err(|| self.state.mark_broken())?;
         self.write(s)?;
+        Ok(self)
+    }
+
+    /// Completely encode an option none value.
+    pub fn encode_none(&mut self) -> Result<&mut Self> {
+        self.state.begin_option()?;
+        self.state.set_option_none();
+        self.write(&[0])?;
+        Ok(self)
+    }
+
+    /// Begin encoding an option some value. This should be followed by
+    /// encoding the inner value, which then auto-finishes the option.
+    pub fn begin_some(&mut self) -> Result<&mut Self> {
+        self.state.begin_option()?;
+        self.state.set_option_some()?;
+        self.write(&[1])?;
+        Ok(self)
+    }
+
+    /// Begin encoding a fixed len seq. This should be followed by encoding
+    /// `len` elements with `begin_seq_elem` followed by a call to
+    /// `finish_seq`.
+    pub fn begin_fixed_len_seq(&mut self, len: usize) -> Result<&mut Self> {
+        self.state.begin_fixed_len_seq(len)?;
+        Ok(self)
+    }
+
+    /// Begin encoding a var len seq. This should be followed by encoding `len`
+    /// elements with `begin_seq_elem` followed by a call to `finish_seq`.
+    pub fn begin_var_len_seq(&mut self, len: usize) -> Result<&mut Self> {
+        self.state.begin_var_len_seq()?;
+        self.state.set_var_len_seq_len(len);
+        write_var_len_uint(&mut self.write, len as u128)
+            .do_if_err(|| self.state.mark_broken())?;
+        Ok(self)
+    }
+    
+    /// Begin encoding an element in a seq. This should be followed by encoding
+    /// the inner value. See `begin_seq`.
+    pub fn begin_seq_elem(&mut self) -> Result<&mut Self> {
+        self.state.begin_seq_elem()?;
+        Ok(self)
+    }
+
+    /// Finish encoding a seq. See `begin_seq`.
+    pub fn finish_seq(&mut self) -> Result<&mut Self> {
+        self.state.finish_seq()?;
         Ok(self)
     }
 
@@ -150,27 +206,30 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
         self.state.finish_struct()?;
         Ok(self)
     }
-    
-    /// Begin encoding an enum. This should be followed by `begin_enum_variant`
-    /// followed by encoding the inner value, which then auto-finishes the
-    /// enum.
-    pub fn begin_enum(&mut self) -> Result<&mut Self> {
-        self.state.begin_enum()?;
-        Ok(self)
-    }
 
-    /// Begin coding an enum variant. See `begin_enum`.
-    pub fn begin_enum_variant(
+    /// Begin encoding an enum. This should be followed by encoding the inner
+    /// value, which then auto-finishes the enum.
+    pub fn begin_enum(
         &mut self,
         variant_ord: usize,
         variant_name: &str,
     ) -> Result<&mut Self> {
-        let num_variants = self.state
-            .begin_enum_variant(
-                variant_ord,
-                variant_name,
-            )?;
-        write_ord(&mut self.write, variant_ord, num_variants)?;
+        // as a single all-or-nothing state change (via cancel if non-immediate
+        // fail):
+        //
+        // - begin enum
+        // - begin enum variant ord
+        // - begin enum variant name
+        let num_variants = self.state.begin_enum()?;
+        self.state
+            .begin_enum_variant_ord(variant_ord)
+            .do_if_err(|| self.state.cancel_enum())?;
+        self.state
+            .begin_enum_variant_name(variant_name)
+            .do_if_err(|| self.state.cancel_enum())?;
+
+        write_ord(&mut self.write, variant_ord, num_variants)
+            .do_if_err(|| self.state.mark_broken())?;
         Ok(self)
     }
 }

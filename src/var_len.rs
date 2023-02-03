@@ -33,6 +33,8 @@ where
     W: Write,
 {
     debug_assert!(ord < num_variants, "enum ord out of bounds");
+    // if the ord is greater than 2^64... congratulations, future man, on
+    // having several dozen exabytes of RAM. you get a free bug.
     let all_bytes = u64::to_le_bytes(ord as _);
     let byte_len = ord_byte_len(num_variants - 1);
     let used_bytes = &all_bytes[..byte_len];
