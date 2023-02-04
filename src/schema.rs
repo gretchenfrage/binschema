@@ -46,7 +46,7 @@ pub enum Schema {
     Recurse(usize),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ScalarType {
     /// Encoded as-is.
     U8,

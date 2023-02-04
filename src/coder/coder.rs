@@ -1,7 +1,11 @@
+//! Machine for validating API usage and schema conformance which is used in
+//! both encoding and decoding. 
+
 
 use crate::{
     do_if_err::DoIfErr,
     error::{
+        Result,
         error,
         ensure,
         bail,
@@ -13,8 +17,6 @@ use crate::{
     },
     coder::coder_alloc::CoderStateAlloc,
 };
-use std::io::Result;
-
 
 /// Used to construct an (en/de)coder, and ensures that some schema is being
 /// validly (en/de)coded.
@@ -96,7 +98,8 @@ impl<'a> CoderState<'a> {
             Ok(())
         } else {
             Err(error!(
-                "API usage error, didn't finish coding, broken = {}",
+                ApiUsage,
+                "didn't finish coding, broken = {}",
                 self.broken,
             ))
         }
@@ -112,10 +115,10 @@ macro_rules! validate_top {
     ($self:ident, |$top:ident| $opt_ret:expr, $got:expr)=>{{
         ensure!(
             !$self.broken,
-            "API usage error, usage after IO error"
+            ApiUsage, "usage after IO error"
         );
         match $self.stack.iter_mut().rev().next() {
-            None => bail!("API usage error, usage of finished coder"),
+            None => bail!(ApiUsage, "usage of finished coder"),
             Some($top) => match $opt_ret {
                 Some(ret) => ret,
                 None => match &$top.api_state {
@@ -123,28 +126,28 @@ macro_rules! validate_top {
                     &ApiState::OptionUninitSomeness => unreachable!(),
                     &ApiState::SeqUninitLen => unreachable!(),
                     &ApiState::Need => bail!(
-                        "schema non-comformance, need {:?}, got {}",
+                        SchemaNonConformance, "need {:?}, got {}",
                         $top.schema,
                         $got,
                     ),
                     &ApiState::Seq { .. } => bail!(
-                        "API usage error, need seq elem/finish, got {}",
+                        ApiUsage, "need seq elem/finish, got {}",
                         $got,
                     ),
                     &ApiState::Tuple { .. } => bail!(
-                        "API usage error, need tuple elem/finish, got {}",
+                        ApiUsage, "need tuple elem/finish, got {}",
                         $got,
                     ),
                     &ApiState::Struct { .. } => bail!(
-                        "API usage error, need struct field/finish, got {}",
+                        ApiUsage, "need struct field/finish, got {}",
                         $got,
                     ),
                     &ApiState::Enum { variant_ord: None } => bail!(
-                        "API usage error, need enum variant ord, got {}",
+                        ApiUsage, "need enum variant ord, got {}",
                         $got,
                     ),
                     &ApiState::Enum { variant_ord: Some(_) } => bail!(
-                        "API usage error, need enum variant name, got {}",
+                        ApiUsage, "need enum variant name, got {}",
                         $got,
                     ),
                 },
@@ -216,21 +219,24 @@ macro_rules! code_simple {
 }
 
 impl<'a> CoderState<'a> {
+    /// Unwrap top stack frame.
     fn top(&mut self) -> &mut StackFrame<'a> {
         let i = self.stack.len() - 1;
         &mut self.stack[i]
     }
 
+    /// Push a stack frame for needing the schema. If the schema is recurse,
+    /// resolve it first.
     fn push_need(&mut self, mut schema: &'a Schema) -> Result<()> {
         let mut i = self.stack.len();
         while let &Schema::Recurse(n) = schema {
             if n == 0 {
                 self.broken = true;
-                bail!("invalid schema, recurse of level 0");
+                bail!(IllegalSchema, "recurse of level 0");
             }
             i = i
                 .checked_sub(n)
-                .ok_or_else(|| error!("invalid schema, recurse past base of stack"))
+                .ok_or_else(|| error!(IllegalSchema, "recurse past base of stack"))
                 .do_if_err(|| self.broken = true)?;
             schema = self.stack[i].schema;
         }
@@ -241,6 +247,7 @@ impl<'a> CoderState<'a> {
         Ok(())
     }
 
+    /// Pop stack frame. If this uncovers auto finish frames, pop those too.
     fn pop(&mut self) {
         self.stack.pop().unwrap();
         while matches!(
@@ -248,6 +255,22 @@ impl<'a> CoderState<'a> {
             Some(&StackFrame { api_state: ApiState::AutoFinish, .. })
         ) {
             self.stack.pop().unwrap();
+        }
+    }
+
+    /// Get the schema that needs to be coded. Fails if has already began
+    /// coding that schema. Will never return `Schema::Recurse`--rather,
+    /// will return the schema that recursion resolved to, or fail if it
+    /// couldn't resolve.
+    pub(crate) fn need(&self) -> Result<&'a Schema> {
+        match self.stack.iter().rev().next() {
+            Some(&StackFrame {
+                schema,
+                api_state: ApiState::Need,
+            }) => Ok(schema),
+            _ => Err(error!(
+                ApiUsage, ".need() call while not in need state"
+            ))
         }
     }
 
@@ -345,7 +368,7 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             fixed_len == len,
-            "schema non-comformance, need seq len {}, got seq len {}",
+            SchemaNonConformance, "need seq len {}, got seq len {}",
             fixed_len,
             len
         );
@@ -409,7 +432,7 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             *next < len,
-            "API usage error, begin seq elem at idx {}, but that is seq's declared len",
+            ApiUsage, "begin seq elem at idx {}, but that is seq's declared len",
             *next
         );
         *next += 1;
@@ -438,7 +461,7 @@ impl<'a> CoderState<'a> {
         debug_assert!(len <= next);
         ensure!(
             len == next,
-            "API usage error, finish seq of declared len {}, but only coded {} elems",
+            ApiUsage, "finish seq of declared len {}, but only coded {} elems",
             len,
             next
         );
@@ -482,7 +505,7 @@ impl<'a> CoderState<'a> {
             )
             .get(*next)
             .ok_or_else(|| error!(
-                "schema non-comformance, begin tuple elem at idx {}, but that is the tuple's len",
+                SchemaNonConformance, "begin tuple elem at idx {}, but that is the tuple's len",
                 *next,
             ))?;
         *next += 1;
@@ -510,7 +533,7 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             inners.len() == next,
-            "schema non-comformance, finish tuple of len {}, but only encoded {} elems",
+            SchemaNonConformance, "finish tuple of len {}, but only encoded {} elems",
             inners.len(),
             next,
         );
@@ -554,12 +577,12 @@ impl<'a> CoderState<'a> {
             )
             .get(*next)
             .ok_or_else(|| error!(
-                "schema non-comformance, begin struct field at idx {}, but that is the struct's len",
+                SchemaNonConformance, "begin struct field at idx {}, but that is the struct's len",
                 *next,
             ))?;
         ensure!(
             &field.name == name,
-            "schema non-comformance, need struct field {:?}, got struct field {:?}",
+            SchemaNonConformance, "need struct field {:?}, got struct field {:?}",
             field.name,
             name,
         );
@@ -588,7 +611,7 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             fields.len() == next,
-            "schema non-comformance, finish struct of len {}, but only coded {} elems",
+            SchemaNonConformance, "finish struct of len {}, but only coded {} elems",
             fields.len(),
             next,
         );
@@ -642,7 +665,7 @@ impl<'a> CoderState<'a> {
         //       non-conformance error
         ensure!(
             variant_ord < num_variants,
-            "schema non-comformance, begin enum with variant ordinal {}, but enum only has {} variants",
+            SchemaNonConformance, "begin enum with variant ordinal {}, but enum only has {} variants",
             variant_ord,
             num_variants
         );
@@ -675,7 +698,7 @@ impl<'a> CoderState<'a> {
         let need_variant_name = &variants[variant_ord].name;
         ensure!(
             variant_name == need_variant_name,
-            "schema non-comformance, begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
+            SchemaNonConformance, "begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
             variant_name,
             need_variant_name,
         );

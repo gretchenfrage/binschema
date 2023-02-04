@@ -2,6 +2,8 @@
 use crate::{
     do_if_err::DoIfErr,
     error::{
+        Result,
+        Error,
         error,
         bail,
     },
@@ -11,16 +13,14 @@ use crate::{
         read_var_len_sint,
         read_ord,
     },
+    schema::Schema,
 };
 use std::{
     mem::{
         size_of,
         take,
     },
-    io::{
-        Read,
-        Result,
-    },
+    io::Read,
     borrow::BorrowMut,
     iter::repeat,
 };
@@ -35,6 +35,16 @@ pub struct Decoder<'a, 'b, R> {
 impl<'a, 'b, R> Decoder<'a, 'b, R> {
     pub fn new(state: &'b mut CoderState<'a>, read: &'b mut R) -> Self {
         Decoder { state, read }
+    }
+
+    /// Get the schema that needs to be decoded. Fails if has already began
+    /// decoding that schema. Will never return `Schema::Recurse`--rather,
+    /// will return the schema that recursion resolved to, or fail if it
+    /// couldn't resolve.
+    ///
+    /// This is usually not necessary to do. It's mainly for debugging.
+    pub fn need(&self) -> Result<&'a Schema> {
+        self.state.need()
     }
 }
 
@@ -55,10 +65,12 @@ macro_rules! decode_var_len_uint {
         pub fn $m(&mut self) -> Result<$t> {
             self.state.$c()?;
             read_var_len_uint(&mut self.read)
+                .map_err(Error::from)
                 .and_then(|n| $t::try_from(n)
                     .map_err(|_| error!(
+                        MalformedData,
                         concat!(
-                            "malformed data, {} out of range for a ",
+                            "{} out of range for a ",
                             stringify!($t),
                         ),
                         n,
@@ -73,10 +85,12 @@ macro_rules! decode_var_len_sint {
         pub fn $m(&mut self) -> Result<$t> {
             self.state.$c()?;
             read_var_len_sint(&mut self.read)
+                .map_err(Error::from)
                 .and_then(|n| $t::try_from(n)
                     .map_err(|_| error!(
+                        MalformedData,
                         concat!(
-                            "malformed data, {} out of range for a ",
+                            "{} out of range for a ",
                             stringify!($t),
                         ),
                         n,
@@ -97,9 +111,10 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
     /// Read a varlen-encoded usize.
     fn read_len(&mut self) -> Result<usize> {
         read_var_len_uint(&mut self.read)
+            .map_err(Error::from)
             .and_then(|n| usize::try_from(n)
                 .map_err(|_| error!(
-                    "platform limits or malformed data, {} out of range for a usize",
+                    PlatformLimits, "{} out of range for a usize",
                     n,
                 )))
             .do_if_err(|| self.state.mark_broken())
@@ -131,7 +146,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         let n = u32::from_le_bytes(self.read([0; 4])?);
         char::from_u32(n)
             .ok_or_else(|| error!(
-                "malformed data, {} is not a valid char",
+                MalformedData, "{} is not a valid char",
                 n
             ))
     }
@@ -142,7 +157,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         match n {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(error!("malformed data, {} is not a valid bool", n)),
+            _ => Err(error!(MalformedData, "{} is not a valid bool", n)),
         }
     }
 
@@ -175,7 +190,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
             self.state.mark_broken();
             bbuf.clear();
             *buf = String::from_utf8(bbuf).unwrap();
-            return Err(e);
+            return Err(e.into());
         }
 
         // try to convert to utf8
@@ -191,7 +206,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
                 bbuf.clear();
                 *buf = String::from_utf8(bbuf).unwrap();
                 Err(error!(
-                    "malformed data, non UTF8 str bytes",
+                    MalformedData, "non UTF8 str bytes",
                 ))
             }
         }
@@ -236,7 +251,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
                 0 => false,
                 1 => true,
                 _ => bail!(
-                    "malformed data, {} is not a valid option someness",
+                    MalformedData, "{} is not a valid option someness",
                     n,
                 ),
             };
@@ -251,9 +266,9 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
     /// Begin decoding a fixed len seq. This should be followed by decoding
     /// `len` elements with `begin_seq_elem` followed by a call to
     /// `finish_seq`.
-    pub fn begin_fixed_len_seq(&mut self, len: usize) -> Result<&mut Self> {
+    pub fn begin_fixed_len_seq(&mut self, len: usize) -> Result<()> {
         self.state.begin_fixed_len_seq(len)?;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin decoding a var len seq. Returns the length. This should be
@@ -268,56 +283,56 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
 
     /// Begin decoding an element in a seq. This should be followed by decoding
     /// the inner value. See `begin_fixed_len_seq` or `begin_var_len_seq`.
-    pub fn begin_seq_elem(&mut self) -> Result<&mut Self> {
+    pub fn begin_seq_elem(&mut self) -> Result<()> {
         self.state.begin_seq_elem()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Finish decoding a seq. See `begin_fixed_len_seq` or
     /// `begin_var_len_seq`.
-    pub fn finish_seq(&mut self) -> Result<&mut Self> {
+    pub fn finish_seq(&mut self) -> Result<()> {
         self.state.finish_seq()?;
-        Ok(self)
+        Ok(())
     }
     
     /// Begin decoding a tuple. This should be followed by decoding the
     /// elements with `begin_tuple_elem` followed by a call to `finish_tuple`.
-    pub fn begin_tuple(&mut self) -> Result<&mut Self> {
+    pub fn begin_tuple(&mut self) -> Result<()> {
         self.state.begin_tuple()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin decoding an element in a tuple. This should be followed by
     /// decoding the inner value. See `begin_tuple`,
-    pub fn begin_tuple_elem(&mut self) -> Result<&mut Self> {
+    pub fn begin_tuple_elem(&mut self) -> Result<()> {
         self.state.begin_tuple_elem()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Finish decoding a tuple. See `begin_tuple`.
-    pub fn finish_tuple(&mut self) -> Result<&mut Self> {
+    pub fn finish_tuple(&mut self) -> Result<()> {
         self.state.finish_tuple()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin decoding a struct. This should be followed by decoding the
     /// fields with `begin_struct_field` followed by a call to `finish_struct`.
-    pub fn begin_struct(&mut self) -> Result<&mut Self> {
+    pub fn begin_struct(&mut self) -> Result<()> {
         self.state.begin_struct()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin decoding a field in a struct. This should be followed by
     /// decoding the inner value. See `begin_struct`,
-    pub fn begin_struct_field(&mut self, name: &str) -> Result<&mut Self> {
+    pub fn begin_struct_field(&mut self, name: &str) -> Result<()> {
         self.state.begin_struct_field(name)?;
-        Ok(self)
+        Ok(())
     }
 
     /// Finish decoding a struct. See `begin_struct`.
-    pub fn finish_struct(&mut self) -> Result<&mut Self> {
+    pub fn finish_struct(&mut self) -> Result<()> {
         self.state.finish_struct()?;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin decoding an enum. Returns the variant ordinal. This should be
@@ -334,8 +349,8 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
     }
 
     /// Provide the name of the enum variant. See `begin_enum`.
-    pub fn begin_enum_variant(&mut self, name: &str) -> Result<&mut Self> {
+    pub fn begin_enum_variant(&mut self, name: &str) -> Result<()> {
         self.state.begin_enum_variant_name(name)?;
-        Ok(self)
+        Ok(())
     }
 }

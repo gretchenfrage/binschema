@@ -1,12 +1,25 @@
 //! Handling of variable-length integer logic.
 
 
-use crate::error::*;
 use std::io::{
     Read,
     Write,
     Result,
+    Error,
+    ErrorKind,
 };
+
+
+macro_rules! ensure {
+    ($c:expr, $($e:tt)*)=>{
+        if !$c {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!($($e)*),
+            ));
+        }
+    };
+}
 
 
 /// Number of bytes needed to encode an ordinal based on max ordinal
@@ -170,6 +183,7 @@ where
     let mut shift = 6;
 
     while more {
+        // TODO: should use crate-specific error types
         ensure!(
             shift < 128,
             "malformed data: too many bytes in var len sint",

@@ -15,14 +15,14 @@
 //! - to encode (serialize) a value:
 //!     1. combine `&Schema` and `CoderStateAlloc` into `CoderState`
 //!     2. combine `&mut CoderState` and `&mut W` where `W: Write` into `Encoder`
-//!     3. pass `Encoder` and `&`value into procedure for encoding value
+//!     3. pass `&mut Encoder` and `&`value into procedure for encoding value
 //!     4. on `CoderState`, call `.is_finished_or_err()?` to guarantee that
 //!        valid schema-comformant data was fully written to `W`
 //!     5. convert `CoderState` back into `CoderStateAlloc` so it can be reused
 //! - to decode (deserialize) a value:
 //!     1. combine `&Schema` and `CoderStateAlloc` into `CoderState`
 //!     2. combine `&mut CoderState` and `&mut R` where `R: Read` into `Decoder`
-//!     3. pass `Decoder` into procedure for decoding value
+//!     3. pass `&mut Decoder` into procedure for decoding value
 //!     4. on `CoderState`, call `.is_finished_or_err()?` to guarantee that
 //!        valid schema-comformant data was fully read from `R`, and no more
 //!     5. convert `CoderState` back into `CoderStateAlloc` so it can be reused
@@ -43,18 +43,24 @@
 //!   trees
 
 
+pub mod error;
 pub mod schema;
 pub mod value;
+pub mod self_code;
 
 mod do_if_err;
-mod error;
 mod serde_schema;
 mod var_len;
 mod coder;
 mod encoder;
 mod decoder;
+mod serde;
 
 pub use crate::schema::Schema;
+pub use crate::self_code::{
+    SelfEncode,
+    SelfDecode,
+};
 
 pub use crate::{
     coder::{
