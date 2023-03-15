@@ -50,6 +50,7 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
                     let len = got_len
                         .ok_or_else(|| error!(
                             Other,
+                            Some(self.coder_state()),
                             "serialize var len seq without specifying len",
                         ))?;
                     self.begin_var_len_seq(len)?;
@@ -61,6 +62,7 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
                 },
                 schema => bail!(
                     SchemaNonConformance,
+                    Some(self.coder_state()),
                     "need {:?}, got seq-like",
                     schema,
                 ),

@@ -223,8 +223,9 @@ impl KnownSchema for Schema {
                 Char(()),
                 Bool(()),
             }),
-            CharString(()),
-            ByteString(()),
+            Str(()),
+            Bytes(()),
+            Unit(()),
             Option(recurse(1)),
             Seq({
                 (len: ?(u64)),
@@ -239,7 +240,7 @@ impl KnownSchema for Schema {
                 (name: str),
                 (inner: recurse(3)),
             }]),
-            Recurse(recurse(1)),
+            Recurse(u64),
         })
     }
 }

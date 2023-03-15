@@ -16,7 +16,7 @@ where
     T: Debug + PartialEq + Serialize + for<'d> Deserialize<'d> + KnownSchema,
 {
     println!("{:#?}", val);
-    println!("{:#?}", Test1::schema());
+    println!("{:#?}", T::schema());
 
     // prep
     let schema = T::schema();
@@ -24,16 +24,18 @@ where
     let mut buf = Vec::new();
 
     // serialize
-    let mut coder = CoderState::new(&schema, coder_alloc);
+    let mut coder = CoderState::new(&schema, coder_alloc, None);
     let mut encoder = Encoder::new(&mut coder, &mut buf);
-    val.serialize(&mut encoder).unwrap();
+    val.serialize(&mut encoder)
+        .map_err(|e| println!("{}", e))
+        .unwrap();
     coder.is_finished_or_err().unwrap();
     coder_alloc = coder.into_alloc();
 
     println!("{:?}", buf);
 
     // deserialize
-    let mut coder = CoderState::new(&schema, coder_alloc);
+    let mut coder = CoderState::new(&schema, coder_alloc, None);
     let mut read = buf.as_slice();
     let mut decoder = Decoder::new(&mut coder, &mut read);
     let val2 = T::deserialize(&mut decoder).unwrap();
@@ -94,13 +96,13 @@ fn test_2() {
     });
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, KnownSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
 pub enum BinaryTree {
     Branch {
         value: u32,
-        #[schema(recurse = 1)]
+        #[schema(recurse = 2)]
         left: Box<BinaryTree>,
-        #[schema(recurse = 1)]
+        #[schema(recurse = 2)]
         right: Box<BinaryTree>,
     },
     Leaf(u32),
@@ -108,7 +110,7 @@ pub enum BinaryTree {
 
 #[test]
 fn binary_tree_test() {
-    let binary_tree = BinaryTree::Branch {
+    round_trip_test(BinaryTree::Branch {
         value: 5,
         left: Box::new(BinaryTree::Leaf(2)),
         right: Box::new(BinaryTree::Branch {
@@ -116,8 +118,10 @@ fn binary_tree_test() {
             left: Box::new(BinaryTree::Leaf(7)),
             right: Box::new(BinaryTree::Leaf(20)),
         }),
-    };
+    });
+}
 
-    println!("{:#?}", binary_tree);
-    println!("{:#?}", BinaryTree::schema());
+#[test]
+fn schema_schema_test() {
+    round_trip_test(Schema::schema());
 }

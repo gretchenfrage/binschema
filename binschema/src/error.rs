@@ -1,5 +1,6 @@
 //! Error types.
 
+use crate::coder::coder::CoderState;
 use std::fmt::{self, Formatter, Display};
 
 
@@ -9,6 +10,7 @@ pub type Result<I> = std::result::Result<I, Error>;
 pub struct Error {
     kind: ErrorKind,
     error: Box<dyn std::error::Error + Send + Sync>,
+    coder_state: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -63,13 +65,18 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    pub fn new<E>(kind: ErrorKind, error: E) -> Self
+    pub fn new<E>(
+        kind: ErrorKind,
+        error: E,
+        coder_state: Option<&CoderState>,
+    ) -> Self
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         Error {
             kind,
             error: error.into(),
+            coder_state: coder_state.map(|state| format!("{:?}", state)),
         }
     }
 
@@ -77,7 +84,7 @@ impl Error {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        Self::new(ErrorKind::Other, error)
+        Self::new(ErrorKind::Other, error, None)
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -99,7 +106,7 @@ impl Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::new(ErrorKind::Io, error)
+        Self::new(ErrorKind::Io, error, None)
     }
 }
 
@@ -122,6 +129,10 @@ impl Display for Error {
         Display::fmt(&self.kind, f)?;
         f.write_str(", ")?;
         Display::fmt(&self.error, f)?;
+        if let Some(ref coder_state) = self.coder_state {
+            f.write_str("\nstate: ")?;
+            f.write_str(coder_state)?;
+        }
         Ok(())
     }
 }
@@ -134,10 +145,11 @@ impl std::error::Error for Error {
 
 
 macro_rules! error {
-    ($k:ident, $($e:tt)*)=>{
+    ($k:ident, $coder_state:expr, $($e:tt)*)=>{
         $crate::error::Error::new(
             $crate::error::ErrorKind::$k,
             format!($($e)*),
+            $coder_state,
         )
     };
 }

@@ -37,6 +37,10 @@ impl<'a, 'b, W> Encoder<'a, 'b, W> {
     pub fn need(&self) -> Result<&'a Schema> {
         self.state.need()
     }
+
+    pub fn coder_state(&self) -> &CoderState<'a> {
+        &*self.state
+    }
 }
 
 macro_rules! encode_le_bytes {

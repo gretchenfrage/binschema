@@ -51,6 +51,23 @@ pub enum Schema {
     Recurse(usize),
 }
 
+impl Schema {
+    pub(crate) fn non_recursive_display_str(&self) -> &'static str {
+        match self {
+            Schema::Scalar(st) => st.display_str(),
+            Schema::Str => "str",
+            Schema::Bytes => "bytes",
+            Schema::Unit => "()",
+            Schema::Option(_) => "?(..)",
+            Schema::Seq(_) => "[..]",
+            Schema::Tuple(_)=> "(..)",
+            Schema::Struct(_) => "{..}",
+            Schema::Enum(_) => "enum {..}",
+            Schema::Recurse(_) => "recurse(_)",
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum ScalarType {
     /// Encoded as-is.
@@ -80,6 +97,27 @@ pub enum ScalarType {
     Char,
     /// Encoded as 1 byte, 0 or 1.
     Bool,
+}
+
+impl ScalarType {
+    fn display_str(self) -> &'static str {
+        match self {
+            ScalarType::U8 => "u8",
+            ScalarType::U16 => "u16",
+            ScalarType::U32 => "u32",
+            ScalarType::U64 => "u64",
+            ScalarType::U128 => "u128",
+            ScalarType::I8 => "i8",
+            ScalarType::I16 => "i16",
+            ScalarType::I32 => "i32",
+            ScalarType::I64 => "i64",
+            ScalarType::I128 => "i128",
+            ScalarType::F32 => "f32",
+            ScalarType::F64 => "f64",
+            ScalarType::Char => "char",
+            ScalarType::Bool => "bool",
+        }
+    }
 }
 
 /// Value in `Schema::Seq`.

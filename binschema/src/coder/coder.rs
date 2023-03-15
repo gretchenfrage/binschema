@@ -17,13 +17,78 @@ use crate::{
     },
     coder::coder_alloc::CoderStateAlloc,
 };
+use std::{
+    write,
+    writeln,
+    io::Write,
+    fmt::{self, Formatter, Debug},
+};
+
 
 /// Used to construct an (en/de)coder, and ensures that some schema is being
 /// validly (en/de)coded.
-#[derive(Debug, Clone)]
 pub struct CoderState<'a> {
     stack: Vec<StackFrame<'a>>,
     broken: bool,
+    dbg_log: Option<DbgLog<'a>>,
+}
+
+struct DbgLog<'a> {
+    write: &'a mut (dyn Write + 'a),
+    indent: usize,
+}
+
+macro_rules! dbg_log {
+    ($self:ident, $($t:tt)*)=>{
+        if let Some(ref mut dbg_log) = $self.dbg_log {
+            for _ in 0..dbg_log.indent {
+                let _ = write!(dbg_log.write, "  ")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            }
+            let _ = write!(dbg_log.write, "<")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = write!(dbg_log.write, $($t)*)
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = writeln!(dbg_log.write, "/>")
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+        }
+    };
+}
+
+macro_rules! dbg_log_push {
+    ($self:ident, $($t:tt)*)=>{
+        if let Some(ref mut dbg_log) = $self.dbg_log {
+            for _ in 0..dbg_log.indent {
+                let _ = write!(dbg_log.write, "  ")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            }
+            let _ = write!(dbg_log.write, "<")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = write!(dbg_log.write, $($t)*)
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = writeln!(dbg_log.write, ">")
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            dbg_log.indent += 1;
+        }
+    };
+}
+
+macro_rules! dbg_log_pop {
+    ($self:ident, $($t:tt)*)=>{
+        if let Some(ref mut dbg_log) = $self.dbg_log {
+            for _ in 0..dbg_log.indent {
+                let _ = write!(dbg_log.write, "  ")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            }
+            let _ = write!(dbg_log.write, "</")
+                    .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = write!(dbg_log.write, $($t)*)
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            let _ = writeln!(dbg_log.write, ">")
+                .map_err(|e| eprintln!("IO error in coder dbg log: {}", e));
+            dbg_log.indent -= 1;
+        }
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -73,10 +138,34 @@ enum ApiState {
     }
 }
 
+impl<'a> Debug for CoderState<'a> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_fmt(format_args!("CoderState {{\n"))?;
+        f.write_fmt(format_args!("    broken: {},\n", self.broken))?;
+        f.write_fmt(format_args!("    stack:\n"))?;
+        for (i, frame) in self.stack.iter().rev().enumerate() {
+            let i = format!("{:02}", i);
+            f.write_fmt(format_args!(
+                "    {}. schema: {}\n",
+                i, frame.schema.non_recursive_display_str(),
+            ))?;
+            f.write_str("    ")?;
+            for _ in 0..i.len() + 2 {
+                f.write_str(" ")?;
+            }
+            f.write_fmt(format_args!("state: {:?}\n", frame.api_state))?;
+        }
+        f.write_fmt(format_args!("}}"))?;
+        Ok(())
+    }
+}
+
+
 impl<'a> CoderState<'a> {
     pub fn new(
         schema: &'a Schema,
         alloc: CoderStateAlloc,
+        dbg_log: Option<&'a mut (dyn Write + 'a)>,
     ) -> Self {
         let mut stack = alloc.into_stack();
         stack.push(StackFrame {
@@ -85,7 +174,8 @@ impl<'a> CoderState<'a> {
         });
         CoderState {
             stack,
-            broken: false
+            broken: false,
+            dbg_log: dbg_log.map(|write| DbgLog { write, indent: 0 }),
         }
     }
 
@@ -99,6 +189,7 @@ impl<'a> CoderState<'a> {
         } else {
             Err(error!(
                 ApiUsage,
+                Some(self),
                 "didn't finish coding, broken = {}",
                 self.broken,
             ))
@@ -115,10 +206,12 @@ macro_rules! validate_top {
     ($self:ident, |$top:ident| $opt_ret:expr, $got:expr)=>{{
         ensure!(
             !$self.broken,
-            ApiUsage, "usage after IO error"
+            ApiUsage,
+            Some($self),
+            "usage after IO error",
         );
         match $self.stack.iter_mut().rev().next() {
-            None => bail!(ApiUsage, "usage of finished coder"),
+            None => bail!(ApiUsage, Some($self), "usage of finished coder"),
             Some($top) => match $opt_ret {
                 Some(ret) => ret,
                 None => match &$top.api_state {
@@ -126,28 +219,40 @@ macro_rules! validate_top {
                     &ApiState::OptionUninitSomeness => unreachable!(),
                     &ApiState::SeqUninitLen => unreachable!(),
                     &ApiState::Need => bail!(
-                        SchemaNonConformance, "need {:?}, got {}",
+                        SchemaNonConformance,
+                        Some($self),
+                        "\nneed: {:#?}\ngot: {:#?}",
                         $top.schema,
                         $got,
                     ),
                     &ApiState::Seq { .. } => bail!(
-                        ApiUsage, "need seq elem/finish, got {}",
+                        ApiUsage,
+                        Some($self),
+                        "need seq elem/finish, got {}",
                         $got,
                     ),
                     &ApiState::Tuple { .. } => bail!(
-                        ApiUsage, "need tuple elem/finish, got {}",
+                        ApiUsage,
+                        Some($self),
+                        "need tuple elem/finish, got {}",
                         $got,
                     ),
                     &ApiState::Struct { .. } => bail!(
-                        ApiUsage, "need struct field/finish, got {}",
+                        ApiUsage,
+                        Some($self),
+                        "need struct field/finish, got {}",
                         $got,
                     ),
                     &ApiState::Enum { variant_ord: None } => bail!(
-                        ApiUsage, "need enum variant ord, got {}",
+                        ApiUsage,
+                        Some($self),
+                        "need enum variant ord, got {}",
                         $got,
                     ),
                     &ApiState::Enum { variant_ord: Some(_) } => bail!(
-                        ApiUsage, "need enum variant name, got {}",
+                        ApiUsage,
+                        Some($self),
+                        "need enum variant name, got {}",
                         $got,
                     ),
                 },
@@ -212,6 +317,7 @@ macro_rules! code_simple {
     ($($m:ident($($t:tt)*),)*)=>{$(
         pub(crate) fn $m(&mut self) -> Result<()> {
             validate_need_eq!(self, schema!($($t)*));
+            dbg_log!(self, "{:?}", schema!($($t)*));
             self.pop();
             Ok(())
         }
@@ -232,11 +338,15 @@ impl<'a> CoderState<'a> {
         while let &Schema::Recurse(n) = schema {
             if n == 0 {
                 self.broken = true;
-                bail!(IllegalSchema, "recurse of level 0");
+                bail!(IllegalSchema, Some(self), "recurse of level 0");
             }
             i = i
                 .checked_sub(n)
-                .ok_or_else(|| error!(IllegalSchema, "recurse past base of stack"))
+                .ok_or_else(|| error!(
+                    IllegalSchema,
+                    Some(self),
+                    "recurse past base of stack",
+                ))
                 .do_if_err(|| self.broken = true)?;
             schema = self.stack[i].schema;
         }
@@ -254,6 +364,7 @@ impl<'a> CoderState<'a> {
             self.stack.iter().rev().next(),
             Some(&StackFrame { api_state: ApiState::AutoFinish, .. })
         ) {
+            dbg_log_pop!(self, "auto finish");
             self.stack.pop().unwrap();
         }
     }
@@ -269,7 +380,7 @@ impl<'a> CoderState<'a> {
                 api_state: ApiState::Need,
             }) => Ok(schema),
             _ => Err(error!(
-                ApiUsage, ".need() call while not in need state"
+                ApiUsage, Some(self), ".need() call while not in need state"
             ))
         }
     }
@@ -327,6 +438,7 @@ impl<'a> CoderState<'a> {
                 ..
             }),
         ));
+        dbg_log!(self, "none");
         self.pop();
     }
 
@@ -350,6 +462,7 @@ impl<'a> CoderState<'a> {
                 } => inner
             );
         self.top().api_state = ApiState::AutoFinish;
+        dbg_log_push!(self, "some");
         self.push_need(inner)?;
         Ok(())
     }
@@ -368,10 +481,13 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             fixed_len == len,
-            SchemaNonConformance, "need seq len {}, got seq len {}",
+            SchemaNonConformance,
+            Some(self),
+            "need seq len {}, got seq len {}",
             fixed_len,
             len
         );
+        dbg_log_push!(self, "seq, fixed len={}", len);
         self.top().api_state =
             ApiState::Seq {
                 len,
@@ -408,6 +524,7 @@ impl<'a> CoderState<'a> {
                 ..
             }),
         ));
+        dbg_log_push!(self, "seq, var len={}", len);
         self.top().api_state =
             ApiState::Seq {
                 len,
@@ -432,7 +549,9 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             *next < len,
-            ApiUsage, "begin seq elem at idx {}, but that is seq's declared len",
+            ApiUsage,
+            Some(self),
+            "begin seq elem at idx {}, but that is seq's declared len",
             *next
         );
         *next += 1;
@@ -461,10 +580,13 @@ impl<'a> CoderState<'a> {
         debug_assert!(len <= next);
         ensure!(
             len == next,
-            ApiUsage, "finish seq of declared len {}, but only coded {} elems",
+            ApiUsage,
+            Some(self),
+            "finish seq of declared len {}, but only coded {} elems",
             len,
             next
         );
+        dbg_log_pop!(self, "seq");
         self.pop();
         Ok(())
     }
@@ -477,6 +599,7 @@ impl<'a> CoderState<'a> {
             &Schema::Tuple(_) => (),
             "tuple begin"
         );
+        dbg_log_push!(self, "tuple");
         self.top().api_state =
             ApiState::Tuple {
                 next: 0,
@@ -503,11 +626,17 @@ impl<'a> CoderState<'a> {
                 schema,
                 &Schema::Tuple(ref inners) => inners
             )
-            .get(*next)
-            .ok_or_else(|| error!(
-                SchemaNonConformance, "begin tuple elem at idx {}, but that is the tuple's len",
-                *next,
-            ))?;
+            .get(*next);
+        let inner_schema =
+            match inner_schema {
+                Some(inner_schema) => inner_schema,
+                None => bail!(
+                    SchemaNonConformance,
+                    Some(self),
+                    "begin tuple elem at idx {}, but that is the tuple's len",
+                    *next,
+                ),
+            };
         *next += 1;
         self.push_need(inner_schema)?;
         Ok(())
@@ -533,10 +662,13 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             inners.len() == next,
-            SchemaNonConformance, "finish tuple of len {}, but only encoded {} elems",
+            SchemaNonConformance,
+            Some(self),
+            "finish tuple of len {}, but only encoded {} elems",
             inners.len(),
             next,
         );
+        dbg_log_pop!(self, "tuple");
         self.pop();
         Ok(())
     }
@@ -549,6 +681,7 @@ impl<'a> CoderState<'a> {
             &Schema::Struct(_) => (),
             "struct begin"
         );
+        dbg_log_push!(self, "struct");
         self.top().api_state =
             ApiState::Struct {
                 next: 0,
@@ -575,18 +708,27 @@ impl<'a> CoderState<'a> {
                 schema,
                 &Schema::Struct(ref fields) => fields
             )
-            .get(*next)
-            .ok_or_else(|| error!(
-                SchemaNonConformance, "begin struct field at idx {}, but that is the struct's len",
-                *next,
-            ))?;
+            .get(*next);
+        let field =
+            match field {
+                Some(field) => field,
+                None => bail!(
+                    SchemaNonConformance,
+                    Some(self),
+                    "begin struct field at idx {}, but that is the struct's len",
+                    *next,
+                ),
+            };
         ensure!(
             &field.name == name,
-            SchemaNonConformance, "need struct field {:?}, got struct field {:?}",
+            SchemaNonConformance,
+            Some(self),
+            "need struct field {:?}, got struct field {:?}",
             field.name,
             name,
         );
         *next += 1;
+        dbg_log!(self, "begin struct field {:?}", name);
         self.push_need(&field.inner)?;
         Ok(())
     }
@@ -611,10 +753,13 @@ impl<'a> CoderState<'a> {
             );
         ensure!(
             fields.len() == next,
-            SchemaNonConformance, "finish struct of len {}, but only coded {} elems",
+            SchemaNonConformance,
+            Some(self),
+            "finish struct of len {}, but only coded {} elems",
             fields.len(),
             next,
         );
+        dbg_log_pop!(self, "struct");
         self.pop();
         Ok(())
     }
@@ -638,6 +783,7 @@ impl<'a> CoderState<'a> {
                 &Schema::Enum(ref variants) => variants.len(),
                 "code enum"
             );
+        dbg_log_push!(self, "enum");
         self.top().api_state = ApiState::Enum { variant_ord: None };
         Ok(num_variants)
     }
@@ -665,10 +811,13 @@ impl<'a> CoderState<'a> {
         //       non-conformance error
         ensure!(
             variant_ord < num_variants,
-            SchemaNonConformance, "begin enum with variant ordinal {}, but enum only has {} variants",
+            SchemaNonConformance,
+            Some(self),
+            "begin enum with variant ordinal {}, but enum only has {} variants",
             variant_ord,
             num_variants
         );
+        dbg_log!(self, "variant ord = {}", variant_ord);
         self.top().api_state =
             ApiState::Enum { variant_ord: Some(variant_ord) };
         Ok(())
@@ -698,10 +847,13 @@ impl<'a> CoderState<'a> {
         let need_variant_name = &variants[variant_ord].name;
         ensure!(
             variant_name == need_variant_name,
-            SchemaNonConformance, "begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
+            SchemaNonConformance,
+            Some(self),
+            "begin enum with variant name {:?}, but variant at that ordinal has name {:?}",
             variant_name,
             need_variant_name,
         );
+        dbg_log!(self, "variant name = {:?}", variant_name);
         self.top().api_state = ApiState::AutoFinish;
         self.push_need(&variants[variant_ord].inner)?;
         Ok(())

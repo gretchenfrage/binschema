@@ -62,6 +62,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
                 }
                 schema => bail!(
                     SchemaNonConformance,
+                    Some(self.coder_state()),
                     "need {:?}, got seq-like",
                     schema,
                 ),
@@ -70,6 +71,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
             ensure!(
                 len == got_len,
                 SchemaNonConformance,
+                Some(self.coder_state()),
                 "need seq-like len {}, got seq-like len {}",
                 len,
                 got_len,
@@ -112,6 +114,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
             .get(ord)
             .ok_or_else(|| error!(
                 SchemaNonConformance,
+                Some(self.coder_state()),
                 "decoded ord {}, but only {} variants provided to deserialize_enum",
                 ord,
                 variants.len(),
@@ -271,6 +274,7 @@ impl<'a, 'b, 'c, 'd, R: Read> Deserializer<'d> for &'c mut Decoder<'a, 'b, R> {
     fn deserialize_identifier<V: Visitor<'d>>(self, _v: V) -> Result<V::Value> {
         Err(error!(
             ApiUsage,
+            Some(self.coder_state()),
             "deserialize_identifier directly on Decoder",
         ))
     }

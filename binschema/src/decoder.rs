@@ -46,6 +46,10 @@ impl<'a, 'b, R> Decoder<'a, 'b, R> {
     pub fn need(&self) -> Result<&'a Schema> {
         self.state.need()
     }
+
+    pub fn coder_state(&self) -> &CoderState<'a> {
+        &*self.state
+    }
 }
 
 macro_rules! decode_le_bytes {
@@ -69,6 +73,7 @@ macro_rules! decode_var_len_uint {
                 .and_then(|n| $t::try_from(n)
                     .map_err(|_| error!(
                         MalformedData,
+                        Some(self.coder_state()),
                         concat!(
                             "{} out of range for a ",
                             stringify!($t),
@@ -89,6 +94,7 @@ macro_rules! decode_var_len_sint {
                 .and_then(|n| $t::try_from(n)
                     .map_err(|_| error!(
                         MalformedData,
+                        Some(self.coder_state()),
                         concat!(
                             "{} out of range for a ",
                             stringify!($t),
@@ -114,7 +120,9 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
             .map_err(Error::from)
             .and_then(|n| usize::try_from(n)
                 .map_err(|_| error!(
-                    PlatformLimits, "{} out of range for a usize",
+                    PlatformLimits,
+                    Some(self.coder_state()),
+                    "{} out of range for a usize",
                     n,
                 )))
             .do_if_err(|| self.state.mark_broken())
@@ -146,7 +154,9 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         let n = u32::from_le_bytes(self.read([0; 4])?);
         char::from_u32(n)
             .ok_or_else(|| error!(
-                MalformedData, "{} is not a valid char",
+                MalformedData,
+                Some(self.coder_state()),
+                "{} is not a valid char",
                 n
             ))
     }
@@ -157,7 +167,12 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         match n {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(error!(MalformedData, "{} is not a valid bool", n)),
+            _ => Err(error!(
+                MalformedData,
+                Some(self.coder_state()),
+                "{} is not a valid bool",
+                n,
+            )),
         }
     }
 
@@ -206,7 +221,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
                 bbuf.clear();
                 *buf = String::from_utf8(bbuf).unwrap();
                 Err(error!(
-                    MalformedData, "non UTF8 str bytes",
+                    MalformedData, Some(self.coder_state()), "non UTF8 str bytes",
                 ))
             }
         }
@@ -251,7 +266,9 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
                 0 => false,
                 1 => true,
                 _ => bail!(
-                    MalformedData, "{} is not a valid option someness",
+                    MalformedData,
+                    Some(self.coder_state()),
+                    "{} is not a valid option someness",
                     n,
                 ),
             };
