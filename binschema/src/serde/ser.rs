@@ -1,23 +1,10 @@
-//! Glue between this library and serde. Makes `&mut Encoder` implement
-//! `serde::Serializer`. Some notes on how translations occur:
-//!
-//! - unit structs and unit variants are encoded simply as unit
-//! - newtype structs and newtype variants are encoded simply as the inner
-//!   value
-//! - tuple structs and tuple variants are encoded simply as tuple
-//! - upon encoding a seq, uses the `.need()` function to determine whether the
-//!   schema expects a fixed len or var len seq, which implies the associated
-//!   warning
-//! - a map is encoded as a var len seq of (key, value) tuples
-//! - when asked to "skip a struct field", it tries encoding a none value for
-//!   that field
-
 
 use crate::{
     error::{
         Error,
-        ErrorKind,
         Result,
+        error,
+        bail,
     },
     schema::{
         Schema,
@@ -47,72 +34,83 @@ impl serde::ser::Error for Error {
     }
 }
 
+impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
+    fn serialize_seq_like<'c>(
+        &'c mut self,
+        got_len: Option<usize>,
+    ) -> Result<SeqLikeSerializer<'a, 'b, 'c, W>>
+    {
+        let seq =
+            match self.need()? {
+                &Schema::Seq(SeqSchema { len: Some(len), .. }) => {
+                    self.begin_fixed_len_seq(got_len.unwrap_or(len))?;
+                    true
+                },
+                &Schema::Seq(SeqSchema { len: None, .. }) => {
+                    let len = got_len
+                        .ok_or_else(|| error!(
+                            Other,
+                            "serialize var len seq without specifying len",
+                        ))?;
+                    self.begin_var_len_seq(len)?;
+                    true
+                },
+                &Schema::Tuple(_) => {
+                    self.begin_tuple()?;
+                    false
+                },
+                schema => bail!(
+                    SchemaNonConformance,
+                    "need {:?}, got seq-like",
+                    schema,
+                ),
+            };
+        Ok(SeqLikeSerializer {
+            encoder: self,
+            seq,
+        })
+    }
+}
+
+macro_rules! leaf_methods {
+    ($(
+        $serialize:ident($type:ty), $encode:ident;
+    )*)=>{$(
+        fn $serialize(self, v: $type) -> Result<()> {
+            self.$encode(v)
+        }
+    )*};
+}
+
 impl<'a, 'b, 'c, W: Write> Serializer for &'c mut Encoder<'a, 'b, W> {
     type Ok = ();
     type Error = Error;
-    type SerializeSeq = Self;
-    type SerializeTuple = Self;
-    type SerializeTupleStruct = Self;
-    type SerializeTupleVariant = Self;
+    type SerializeSeq = SeqLikeSerializer<'a, 'b, 'c, W>;
+    type SerializeTuple = SeqLikeSerializer<'a, 'b, 'c, W>;
+    type SerializeTupleStruct = SeqLikeSerializer<'a, 'b, 'c, W>;
+    type SerializeTupleVariant = SeqLikeSerializer<'a, 'b, 'c, W>;
     type SerializeMap = Self;
     type SerializeStruct = Self;
     type SerializeStructVariant = Self;
 
-    fn serialize_bool(self, v: bool) -> Result<()> {
-        self.encode_bool(v)
-    }
-
-    fn serialize_i8(self, v: i8) -> Result<()> {
-        self.encode_i8(v)
-    }
-
-    fn serialize_i16(self, v: i16) -> Result<()> {
-        self.encode_i16(v)
-    }
-
-    fn serialize_i32(self, v: i32) -> Result<()> {
-        self.encode_i32(v)
-    }
-
-    fn serialize_i64(self, v: i64) -> Result<()> {
-        self.encode_i64(v)
-    }
-
-    fn serialize_u8(self, v: u8) -> Result<()> {
-        self.encode_u8(v)
-    }
-
-    fn serialize_u16(self, v: u16) -> Result<()> {
-        self.encode_u16(v)
-    }
-
-    fn serialize_u32(self, v: u32) -> Result<()> {
-        self.encode_u32(v)
-    }
-
-    fn serialize_u64(self, v: u64) -> Result<()> {
-        self.encode_u64(v)
-    }
-
-    fn serialize_f32(self, v: f32) -> Result<()> {
-        self.encode_f32(v)
-    }
-
-    fn serialize_f64(self, v: f64) -> Result<()> {
-        self.encode_f64(v)
-    }
-
-    fn serialize_char(self, v: char) -> Result<()> {
-        self.encode_char(v)
-    }
-
-    fn serialize_str(self, v: &str) -> Result<()> {
-        self.encode_str(v)
-    }
-
-    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        self.encode_bytes(v)
-    }
+    leaf_methods!(
+        serialize_bool(bool), encode_bool;
+        serialize_i8(i8), encode_i8;
+        serialize_i16(i16), encode_i16;
+        serialize_i32(i32), encode_i32;
+        serialize_i64(i64), encode_i64;
+        serialize_i128(i128), encode_i128;
+        serialize_u8(u8), encode_u8;
+        serialize_u16(u16), encode_u16;
+        serialize_u32(u32), encode_u32;
+        serialize_u64(u64), encode_u64;
+        serialize_u128(u128), encode_u128;
+        serialize_f32(f32), encode_f32;
+        serialize_f64(f64), encode_f64;
+        serialize_char(char), encode_char;
+        serialize_str(&str), encode_str;
+        serialize_bytes(&[u8]), encode_bytes;
+    );
 
     fn serialize_none(self) -> Result<()> {
         self.encode_none()
@@ -169,42 +167,20 @@ impl<'a, 'b, 'c, W: Write> Serializer for &'c mut Encoder<'a, 'b, W> {
         value.serialize(self)
     }
 
-    fn serialize_seq(self, len: Option<usize>) -> Result<Self> {
-        let len = len
-            .ok_or_else(|| Error::other("serialize_seq with None len"))?;
-        let is_fixed_len =
-            match self.need()? {
-                &Schema::Seq(SeqSchema {
-                    len: fixed_len,
-                    ..
-                }) => fixed_len.is_some(),
-                need => return Err(Error::new(
-                    ErrorKind::SchemaNonConformance,
-                    format!("need {:?}, got seq begin", need),
-                )),
-            };
-
-        if is_fixed_len {
-            self.begin_fixed_len_seq(len)?;
-        } else {
-            self.begin_var_len_seq(len)?;
-        }
-
-        Ok(self)
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
+        self.serialize_seq_like(len)
     }
 
-    fn serialize_tuple(self, _len: usize) -> Result<Self> {
-        self.begin_tuple()?;
-        Ok(self)
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
+        self.serialize_seq_like(Some(len))
     }
 
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
-        _len: usize,
-    ) -> Result<Self> {
-        self.begin_tuple()?;
-        Ok(self)
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct> {
+        self.serialize_seq_like(Some(len))
     }
 
     fn serialize_tuple_variant(
@@ -212,11 +188,10 @@ impl<'a, 'b, 'c, W: Write> Serializer for &'c mut Encoder<'a, 'b, W> {
         _name: &'static str,
         variant_index: u32,
         variant: &'static str,
-        _len: usize,
-    ) -> Result<Self> {
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant> {
         self.begin_enum(variant_index as usize, variant)?;
-        self.begin_tuple()?;
-        Ok(self)
+        self.serialize_seq_like(Some(len))
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self> {
@@ -247,18 +222,37 @@ impl<'a, 'b, 'c, W: Write> Serializer for &'c mut Encoder<'a, 'b, W> {
         Ok(self)
     }
 
-    fn serialize_i128(self, v: i128) -> Result<()> {
-        self.encode_i128(v)
-    }
-
-    fn serialize_u128(self, v: u128) -> Result<()> {
-        self.encode_u128(v)
-    }
-
     fn is_human_readable(&self) -> bool { false }
 }
 
-impl<'a, 'b, 'c, W: Write> SerializeSeq for &'c mut Encoder<'a, 'b, W> {
+pub struct SeqLikeSerializer<'a, 'b, 'c, W> {
+    encoder: &'c mut Encoder<'a, 'b, W>,
+    seq: bool,
+}
+
+impl<'a, 'b, 'c, W: Write> SeqLikeSerializer<'a, 'b, 'c, W> {
+    fn inner_serialize_element<T>(&mut self, value: &T) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+    {
+        if self.seq {
+            self.encoder.begin_seq_elem()?;
+        } else {
+            self.encoder.begin_tuple_elem()?;
+        }
+        value.serialize(&mut *self.encoder)
+    }
+
+    fn inner_end(self) -> Result<()> {
+        if self.seq {
+            self.encoder.finish_seq()
+        } else {
+            self.encoder.finish_tuple()
+        }
+    }
+}
+
+impl<'a, 'b, 'c, W: Write> SerializeSeq for SeqLikeSerializer<'a, 'b, 'c, W> {
     type Ok = ();
     type Error = Error;
 
@@ -266,16 +260,15 @@ impl<'a, 'b, 'c, W: Write> SerializeSeq for &'c mut Encoder<'a, 'b, W> {
     where
         T: Serialize + ?Sized,
     {
-        self.begin_seq_elem()?;
-        value.serialize(&mut **self)
+        self.inner_serialize_element(value)
     }
 
     fn end(self) -> Result<()> {
-        self.finish_seq()
+        self.inner_end()
     }
 }
 
-impl<'a, 'b, 'c, W: Write> SerializeTuple for &'c mut Encoder<'a, 'b, W> {
+impl<'a, 'b, 'c, W: Write> SerializeTuple for SeqLikeSerializer<'a, 'b, 'c, W> {
     type Ok = ();
     type Error = Error;
 
@@ -283,16 +276,15 @@ impl<'a, 'b, 'c, W: Write> SerializeTuple for &'c mut Encoder<'a, 'b, W> {
     where
         T: Serialize + ?Sized,
     {
-        self.begin_tuple_elem()?;
-        value.serialize(&mut **self)
+        self.inner_serialize_element(value)
     }
 
     fn end(self) -> Result<()> {
-        self.finish_tuple()
+        self.inner_end()
     }
 }
 
-impl<'a, 'b, 'c, W: Write> SerializeTupleStruct for &'c mut Encoder<'a, 'b, W> {
+impl<'a, 'b, 'c, W: Write> SerializeTupleStruct for SeqLikeSerializer<'a, 'b, 'c, W> {
     type Ok = ();
     type Error = Error;
 
@@ -300,16 +292,15 @@ impl<'a, 'b, 'c, W: Write> SerializeTupleStruct for &'c mut Encoder<'a, 'b, W> {
     where
         T: Serialize + ?Sized,
     {
-        self.begin_tuple_elem()?;
-        value.serialize(&mut **self)
+        self.inner_serialize_element(value)
     }
 
     fn end(self) -> Result<()> {
-        self.finish_tuple()
+        self.inner_end()
     }
 }
 
-impl<'a, 'b, 'c, W: Write> SerializeTupleVariant for &'c mut Encoder<'a, 'b, W> {
+impl<'a, 'b, 'c, W: Write> SerializeTupleVariant for SeqLikeSerializer<'a, 'b, 'c, W> {
     type Ok = ();
     type Error = Error;
 
@@ -317,12 +308,11 @@ impl<'a, 'b, 'c, W: Write> SerializeTupleVariant for &'c mut Encoder<'a, 'b, W> 
     where
         T: Serialize + ?Sized,
     {
-        self.begin_tuple_elem()?;
-        value.serialize(&mut **self)
+        self.inner_serialize_element(value)
     }
 
     fn end(self) -> Result<()> {
-        self.finish_tuple()
+        self.inner_end()
     }
 }
 

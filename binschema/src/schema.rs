@@ -1,10 +1,15 @@
 //! Data types for representing a schema, and the macro for constructing them
 //! with syntactic sugar.
 
+use serde::{
+    Serialize,
+    Deserialize,
+};
+
 
 /// Description of how raw binary data encodes less tedious structures of
 /// semantic primitives.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Schema {
     /// Some scalar data type.
     Scalar(ScalarType),
@@ -30,7 +35,7 @@ pub enum Schema {
     /// tree. So for eg, a binary search tree could be represented as:
     ///
     /// ```
-    /// use serde_schema::schema::*;
+    /// use binschema::schema::{Schema, ScalarType};
     ///
     /// Schema::Enum(vec![
     ///     ("Branch", Schema::Struct(vec![
@@ -46,7 +51,7 @@ pub enum Schema {
     Recurse(usize),
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum ScalarType {
     /// Encoded as-is.
     U8,
@@ -78,14 +83,14 @@ pub enum ScalarType {
 }
 
 /// Value in `Schema::Seq`.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct SeqSchema {
     pub len: Option<usize>,
     pub inner: Box<Schema>,
 }
 
 /// Item in `Schema::Struct`.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct StructSchemaField {
     pub name: String,
     pub inner: Schema,
@@ -101,7 +106,7 @@ impl<S: Into<String>> From<(S, Schema)> for StructSchemaField {
 }
 
 /// Item in `Schema::Enum`. 
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct EnumSchemaVariant {
     pub name: String,
     pub inner: Schema,
@@ -119,7 +124,7 @@ impl<S: Into<String>> From<(S, Schema)> for EnumSchemaVariant {
 /// Syntax sugar for constructing `Schema`.
 ///
 /// ```
-/// use serde_schema::schema::*;
+/// use binschema::*;
 ///
 /// let _: Schema = schema!(u8);
 /// let _: Schema = schema!(u16);

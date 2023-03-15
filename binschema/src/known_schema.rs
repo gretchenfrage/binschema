@@ -23,14 +23,14 @@ use std::{
 
 
 /// Type which know what `Schema` its `serde`s with.
-pub trait SerdeSchema {
+pub trait KnownSchema {
     fn schema() -> Schema;
 }
 
 
-macro_rules! scalars_serde_schema {
+macro_rules! scalars_known_schema {
     ($($t:tt,)*)=>{$(
-        impl SerdeSchema for $t {
+        impl KnownSchema for $t {
             fn schema() -> Schema {
                 schema!($t)
             }
@@ -38,7 +38,7 @@ macro_rules! scalars_serde_schema {
     )*};
 }
 
-scalars_serde_schema!(
+scalars_known_schema!(
     u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128,
     f32, f64,
@@ -46,45 +46,45 @@ scalars_serde_schema!(
     bool,
 );
 
-impl SerdeSchema for usize {
+impl KnownSchema for usize {
     fn schema() -> Schema {
         schema!(u64)
     }
 }
 
-impl SerdeSchema for isize {
+impl KnownSchema for isize {
     fn schema() -> Schema {
         schema!(u64)
     }
 }
 
-impl SerdeSchema for str {
+impl KnownSchema for str {
     fn schema() -> Schema {
         schema!(str)
     }
 }
 
-impl SerdeSchema for String {
+impl KnownSchema for String {
     fn schema() -> Schema {
         schema!(str)
     }
 }
 
-impl SerdeSchema for () {
+impl KnownSchema for () {
     fn schema() -> Schema {
         schema!(())
     }
 }
 
-impl<T: SerdeSchema> SerdeSchema for Option<T> {
+impl<T: KnownSchema> KnownSchema for Option<T> {
     fn schema() -> Schema {
         schema!(?(%T::schema()))
     }
 }
 
-macro_rules! seqs_serde_schema {
+macro_rules! seqs_known_schema {
     ($($c:ident,)*)=>{$(
-        impl<T: SerdeSchema> SerdeSchema for $c<T> {
+        impl<T: KnownSchema> KnownSchema for $c<T> {
             fn schema() -> Schema {
                 schema!([_; %T::schema()])
             }
@@ -92,7 +92,7 @@ macro_rules! seqs_serde_schema {
     )*};
 }
 
-seqs_serde_schema!(
+seqs_known_schema!(
     Vec,
     BinaryHeap,
     BTreeSet,
@@ -101,9 +101,9 @@ seqs_serde_schema!(
     VecDeque,
 );
 
-macro_rules! maps_serde_schema {
+macro_rules! maps_known_schema {
     ($($c:ident,)*)=>{$(
-        impl<K: SerdeSchema, V: SerdeSchema> SerdeSchema for $c<K, V> {
+        impl<K: KnownSchema, V: KnownSchema> KnownSchema for $c<K, V> {
             fn schema() -> Schema {
                 schema!([_; (
                     (%K::schema()),
@@ -114,26 +114,26 @@ macro_rules! maps_serde_schema {
     )*};
 }
 
-maps_serde_schema!(
+maps_known_schema!(
     BTreeMap,
     HashMap,
 );
 
-impl<T: SerdeSchema, const LEN: usize> SerdeSchema for [T; LEN] {
+impl<T: KnownSchema, const LEN: usize> KnownSchema for [T; LEN] {
     fn schema() -> Schema {
         schema!([LEN; %T::schema()])
     }
 }
 
-impl<T: SerdeSchema> SerdeSchema for [T] {
+impl<T: KnownSchema> KnownSchema for [T] {
     fn schema() -> Schema {
         schema!([_; %T::schema()])
     }
 }
 
-macro_rules! tuples_serde_schema {
-    (@inner $(t:ident),*)=>{
-        impl<$($t: SerdeSchema),*> SerdeSchema for ($($t),*) {
+macro_rules! tuples_known_schema {
+    (@inner $($t:ident),*)=>{
+        impl<$($t: KnownSchema),*> KnownSchema for ($($t),*) {
             fn schema() -> Schema {
                 schema!(($(
                     (%$t::schema()),
@@ -142,15 +142,15 @@ macro_rules! tuples_serde_schema {
         }
     };
     ($a:ident, $b:ident $(, $t:ident)*)=>{
-        tuples_serde_schema!(@inner $a, $b $(, $t)*);
-        tuples_serde_schema!($b $(, $t)*);
+        tuples_known_schema!(@inner $a, $b $(, $t)*);
+        tuples_known_schema!($b $(, $t)*);
     };
-    ($($whatever:tt)*)=>{};
+    ($a:ident)=>{};
 }
 
-tuples_serde_schema!(A, B, C, D, E, F, G, H, I, J, K);
+tuples_known_schema!(A, B, C, D, E, F, G, H, I, J, K);
 
-impl<T: SerdeSchema> SerdeSchema for Range<T> {
+impl<T: KnownSchema> KnownSchema for Range<T> {
     fn schema() -> Schema {
         schema!({
             (begin: %T::schema()),
@@ -159,7 +159,7 @@ impl<T: SerdeSchema> SerdeSchema for Range<T> {
     }
 }
 
-impl<T: SerdeSchema> SerdeSchema for RangeInclusive<T> {
+impl<T: KnownSchema> KnownSchema for RangeInclusive<T> {
     fn schema() -> Schema {
         schema!({
             (begin: %T::schema()),
@@ -168,7 +168,7 @@ impl<T: SerdeSchema> SerdeSchema for RangeInclusive<T> {
     }
 }
 
-impl<T: SerdeSchema> SerdeSchema for Bound<T> {
+impl<T: KnownSchema> KnownSchema for Bound<T> {
     fn schema() -> Schema {
         schema!(enum {
             Included(%T::schema()),
@@ -178,19 +178,25 @@ impl<T: SerdeSchema> SerdeSchema for Bound<T> {
     }
 }
 
-impl<'a, T: SerdeSchema> SerdeSchema for &'a T {
+impl<'a, T: KnownSchema> KnownSchema for &'a T {
     fn schema() -> Schema {
         T::schema()
     }
 }
 
-impl<'a, T: SerdeSchema> SerdeSchema for &'a mut T {
+impl<'a, T: KnownSchema> KnownSchema for &'a mut T {
     fn schema() -> Schema {
         T::schema()
     }
 }
 
-impl<'a, T: SerdeSchema + ToOwned> SerdeSchema for Cow<'a, T> {
+impl<T: KnownSchema> KnownSchema for Box<T> {
+    fn schema() -> Schema {
+        T::schema()
+    }
+}
+
+impl<'a, T: KnownSchema + ToOwned> KnownSchema for Cow<'a, T> {
     fn schema() -> Schema {
         T::schema()
     }
@@ -198,7 +204,7 @@ impl<'a, T: SerdeSchema + ToOwned> SerdeSchema for Cow<'a, T> {
 
 // TODO: unfortunately, there are more
 
-impl SerdeSchema for Schema {
+impl KnownSchema for Schema {
     fn schema() -> Schema {
         schema!(enum {
             Scalar(enum {

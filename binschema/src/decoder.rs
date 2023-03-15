@@ -172,7 +172,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         buf.clear();
 
         self.state.code_str()?;
-        let len = self.read_len().do_if_err(|| self.state.mark_broken())?;
+        let len = self.read_len()?;
 
         // do a little switcharoo to get ownership of raw Vec<u8> buf
         //

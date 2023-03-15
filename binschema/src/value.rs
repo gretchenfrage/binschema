@@ -10,8 +10,6 @@ use crate::{
     },
     Encoder,
     Decoder,
-    SelfEncode,
-    SelfDecode,
 };
 use std::io::{
     Write,
@@ -56,8 +54,8 @@ pub struct EnumValue {
 }
 
 
-impl SelfEncode for Value {
-    fn encode_to<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+impl Value {
+    pub fn encode_to<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         match self {
             &Value::Scalar(s) => s.encode_to(e),
             &Value::Str(ref s) => e.encode_str(s),
@@ -110,10 +108,8 @@ impl SelfEncode for Value {
             }
         }
     }
-}
 
-impl SelfDecode for Value {
-    fn decode_from<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
+    pub fn decode_from<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
         Ok(match d.need()? {
             &Schema::Scalar(scalar_type) =>
                 Value::Scalar(ScalarValue::decode_from(d, scalar_type)?),
