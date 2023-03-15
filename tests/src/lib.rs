@@ -9,34 +9,8 @@ use serde::{
     Deserialize,
 };
 
-/*
-#[derive(Debug, Clone, Serialize, Deserialize, KnownSchema)]
-pub enum BinaryTree {
-    Branch {
-        value: u32,
-        left: Box<BinaryTree>,
-        right: Box<BinaryTree>,
-    },
-    Leaf(u32),
-}
 
-#[test]
-fn binary_tree_test() {
-    let binary_tree = BinaryTree::Branch {
-        value: 5,
-        left: Box::new(BinaryTree::Leaf(2)),
-        right: Box::new(BinaryTree::Branch {
-            value: 10,
-            left: Box::new(BinaryTree::Leaf(7)),
-            right: Box::new(BinaryTree::Leaf(20)),
-        }),
-    };
-
-    println!("{:#?}", binary_tree);
-    println!("{:#?}", BinaryTree::schema());
-}
-*/
-
+#[cfg(test)]
 fn round_trip_test<T>(val: T)
 where
     T: Debug + PartialEq + Serialize + for<'d> Deserialize<'d> + KnownSchema,
@@ -118,4 +92,32 @@ fn test_2() {
             }
         },
     });
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, KnownSchema)]
+pub enum BinaryTree {
+    Branch {
+        value: u32,
+        #[schema(recurse = 1)]
+        left: Box<BinaryTree>,
+        #[schema(recurse = 1)]
+        right: Box<BinaryTree>,
+    },
+    Leaf(u32),
+}
+
+#[test]
+fn binary_tree_test() {
+    let binary_tree = BinaryTree::Branch {
+        value: 5,
+        left: Box::new(BinaryTree::Leaf(2)),
+        right: Box::new(BinaryTree::Branch {
+            value: 10,
+            left: Box::new(BinaryTree::Leaf(7)),
+            right: Box::new(BinaryTree::Leaf(20)),
+        }),
+    };
+
+    println!("{:#?}", binary_tree);
+    println!("{:#?}", BinaryTree::schema());
 }

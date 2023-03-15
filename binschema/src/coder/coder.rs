@@ -122,7 +122,7 @@ macro_rules! validate_top {
             Some($top) => match $opt_ret {
                 Some(ret) => ret,
                 None => match &$top.api_state {
-                    &ApiState::AutoFinish => unreachable!(),
+                    &ApiState::AutoFinish => unreachable!("{:#?}", $self.stack),
                     &ApiState::OptionUninitSomeness => unreachable!(),
                     &ApiState::SeqUninitLen => unreachable!(),
                     &ApiState::Need => bail!(
@@ -703,6 +703,7 @@ impl<'a> CoderState<'a> {
             need_variant_name,
         );
         self.top().api_state = ApiState::AutoFinish;
+        self.push_need(&variants[variant_ord].inner)?;
         Ok(())
     }
 

@@ -11,10 +11,41 @@ use syn::{
     Fields,
     FieldsNamed,
     FieldsUnnamed,
+    Field,
     DataEnum,
+    Meta,
+    Lit,
 };
 use quote::quote;
 
+fn field_schema(field: &Field) -> TokenStream2 {
+    if let Some(attr) = field.attrs
+        .iter()
+        .find(|attr| attr.path.is_ident("schema"))
+    {
+        let meta = attr.parse_args::<Meta>()
+            .expect("attribute failed to parse");
+        let meta =
+            match meta {
+                Meta::NameValue(meta) => meta,
+                _ => panic!("attribute must be name/value style"),
+            };
+        assert!(meta.path.is_ident("recurse"), "unsupported attribute name");
+        let n =
+            match meta.lit {
+                Lit::Int(int) => int,
+                _ => panic!("recurse level must be int"),
+            };
+        quote! {
+            recurse(#n)
+        }
+    } else {
+        let field_ty = &field.ty;
+        quote! {
+            %<#field_ty as ::binschema::KnownSchema>::schema()
+        }
+    }
+}
 
 fn fields_schema(fields: &Fields) -> TokenStream2 {
     match fields {
@@ -22,9 +53,9 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
             let inner = named.iter()
                 .map(|field| {
                     let field_name = field.ident.as_ref().unwrap();
-                    let field_ty = &field.ty;
+                    let inner = field_schema(field);
                     quote! {
-                        (#field_name: %<#field_ty as ::binschema::KnownSchema>::schema())
+                        (#field_name: #inner)
                     }
                 })
                 .collect::<Punctuated<_, Comma>>();
@@ -38,18 +69,10 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
                     ()
                 }
             } else if unnamed.len() == 1 {
-                let inner_ty = &unnamed[0].ty;
-                quote! {
-                    %<#inner_ty as ::binschema::KnownSchema>::schema()
-                }
+                field_schema(&unnamed[0])
             } else {
                 let inner = unnamed.iter()
-                    .map(|field| {
-                        let field_ty = &field.ty;
-                        quote! {
-                            (%<#field_ty as ::binschema::KnownSchema>::schema())
-                        }
-                    })
+                    .map(field_schema)
                     .collect::<Punctuated<_, Comma>>();
                 quote! {
                     ( #inner )
@@ -64,7 +87,7 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
     }
 }
 
-#[proc_macro_derive(KnownSchema)]
+#[proc_macro_derive(KnownSchema, attributes(schema))]
 pub fn derive_known_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
