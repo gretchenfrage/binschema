@@ -106,8 +106,6 @@ In that example, recurse(0) would refer to the recurse itself,
 recurse(1) would refer to the option, and recurse(2) refers to
 the struct.
 
-## variable length int encodings
-
 ## the meta-schema
 
 Schemas themselves are values which can be encoded. Schemas are thus
@@ -179,6 +177,7 @@ encoded with the following schema, the "meta-schema":
   variant 9 (name = "Recurse"):
     - u64
 
+## variable length int encodings
 
 #### var-len uint encoding
 
