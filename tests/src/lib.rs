@@ -38,7 +38,9 @@ where
     let mut coder = CoderState::new(&schema, coder_alloc, None);
     let mut read = buf.as_slice();
     let mut decoder = Decoder::new(&mut coder, &mut read);
-    let val2 = T::deserialize(&mut decoder).unwrap();
+    let val2 = T::deserialize(&mut decoder)
+        .map_err(|e| println!("{}", e))
+        .unwrap();
     coder.is_finished_or_err().unwrap();
     coder_alloc = coder.into_alloc();
 
@@ -54,7 +56,26 @@ pub struct Test1 {
     foo: u32,
     bar: String,
     baz: [i16; 4],
+    a: (),
+    b: (i32,),
+    c: (i32, i8),
+    d: Test1StructUnit,
+    e: Test1Struct0Tuple,
+    f: Test1StructNewtype,
+    g: Test1Struct2Tuple,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
+struct Test1StructUnit;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
+struct Test1Struct0Tuple();
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
+struct Test1StructNewtype(f32);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
+struct Test1Struct2Tuple(f32, f64);
 
 #[test]
 fn test_1() {
@@ -62,6 +83,13 @@ fn test_1() {
         foo: 500,
         bar: "hello world".into(),
         baz: [7; 4],
+        a: (),
+        b: (74,),
+        c: (72, 4),
+        d: Test1StructUnit,
+        e: Test1Struct0Tuple(),
+        f: Test1StructNewtype(3.5),
+        g: Test1Struct2Tuple(4.2, 2.6),
     });
 }
 

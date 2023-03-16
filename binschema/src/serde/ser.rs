@@ -40,11 +40,11 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
         got_len: Option<usize>,
     ) -> Result<SeqLikeSerializer<'a, 'b, 'c, W>>
     {
-        let seq =
+        let seq_like =
             match self.need()? {
                 &Schema::Seq(SeqSchema { len: Some(len), .. }) => {
                     self.begin_fixed_len_seq(got_len.unwrap_or(len))?;
-                    true
+                    SeqLike::Seq
                 },
                 &Schema::Seq(SeqSchema { len: None, .. }) => {
                     let len = got_len
@@ -54,12 +54,16 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
                             "serialize var len seq without specifying len",
                         ))?;
                     self.begin_var_len_seq(len)?;
-                    true
+                    SeqLike::Seq
                 },
                 &Schema::Tuple(_) => {
                     self.begin_tuple()?;
-                    false
+                    SeqLike::Tuple
                 },
+                &Schema::Unit => {
+                    self.encode_unit()?;
+                    SeqLike::Unit
+                }
                 schema => bail!(
                     SchemaNonConformance,
                     Some(self.coder_state()),
@@ -69,7 +73,7 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
             };
         Ok(SeqLikeSerializer {
             encoder: self,
-            seq,
+            seq_like,
         })
     }
 }
@@ -227,9 +231,16 @@ impl<'a, 'b, 'c, W: Write> Serializer for &'c mut Encoder<'a, 'b, W> {
     fn is_human_readable(&self) -> bool { false }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum SeqLike {
+    Seq,
+    Tuple,
+    Unit,
+}
+
 pub struct SeqLikeSerializer<'a, 'b, 'c, W> {
     encoder: &'c mut Encoder<'a, 'b, W>,
-    seq: bool,
+    seq_like: SeqLike,
 }
 
 impl<'a, 'b, 'c, W: Write> SeqLikeSerializer<'a, 'b, 'c, W> {
@@ -237,19 +248,23 @@ impl<'a, 'b, 'c, W: Write> SeqLikeSerializer<'a, 'b, 'c, W> {
     where
         T: Serialize + ?Sized,
     {
-        if self.seq {
-            self.encoder.begin_seq_elem()?;
-        } else {
-            self.encoder.begin_tuple_elem()?;
+        match self.seq_like {
+            SeqLike::Seq => self.encoder.begin_seq_elem()?,
+            SeqLike::Tuple => self.encoder.begin_tuple_elem()?,
+            SeqLike::Unit => bail!(
+                Other,
+                Some(self.encoder.coder_state()),
+                "serialize element to unit as seq-like",
+            ),
         }
         value.serialize(&mut *self.encoder)
     }
 
     fn inner_end(self) -> Result<()> {
-        if self.seq {
-            self.encoder.finish_seq()
-        } else {
-            self.encoder.finish_tuple()
+        match self.seq_like {
+            SeqLike::Seq => self.encoder.finish_seq(),
+            SeqLike::Tuple => self.encoder.finish_tuple(),
+            SeqLike::Unit => Ok(()),
         }
     }
 }

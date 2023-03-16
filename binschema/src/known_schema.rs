@@ -133,7 +133,7 @@ impl<T: KnownSchema> KnownSchema for [T] {
 
 macro_rules! tuples_known_schema {
     (@inner $($t:ident),*)=>{
-        impl<$($t: KnownSchema),*> KnownSchema for ($($t),*) {
+        impl<$($t: KnownSchema),*> KnownSchema for ($($t,)*) {
             fn schema() -> Schema {
                 schema!(tuple {$(
                     (%$t::schema()),
@@ -141,11 +141,11 @@ macro_rules! tuples_known_schema {
             }
         }
     };
-    ($a:ident, $b:ident $(, $t:ident)*)=>{
-        tuples_known_schema!(@inner $a, $b $(, $t)*);
-        tuples_known_schema!($b $(, $t)*);
+    ($a:ident $(, $t:ident)*)=>{
+        tuples_known_schema!(@inner $a $(, $t)*);
+        tuples_known_schema!($($t),*);
     };
-    ($a:ident)=>{};
+    ()=>{};
 }
 
 tuples_known_schema!(A, B, C, D, E, F, G, H, I, J, K);

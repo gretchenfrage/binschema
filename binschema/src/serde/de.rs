@@ -46,19 +46,23 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         v: V,
         got_len: Option<usize>,
     ) -> Result<V::Value> {
-        let (len, seq) =
+        let (len, seq_like) =
             match self.need()? {
                 &Schema::Seq(SeqSchema { len: Some(len), .. }) => {
                     self.begin_fixed_len_seq(len)?;
-                    (len, true)
+                    (len, SeqLike::Seq)
                 },
                 &Schema::Seq(SeqSchema { len: None, .. }) => {
                     let len = self.begin_var_len_seq()?;
-                    (len, true)
+                    (len, SeqLike::Seq)
                 },
                 &Schema::Tuple(ref inner) => {
                     self.begin_tuple()?;
-                    (inner.len(), false)
+                    (inner.len(), SeqLike::Tuple)
+                }
+                &Schema::Unit => {
+                    self.decode_unit()?;
+                    (0, SeqLike::Unit)
                 }
                 schema => bail!(
                     SchemaNonConformance,
@@ -80,7 +84,7 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
         v.visit_seq(SeqDecoder {
             decoder: self,
             remaining: len,
-            seq,
+            seq_like,
         })
     }
 
@@ -288,10 +292,17 @@ impl<'a, 'b, 'c, 'd, R: Read> Deserializer<'d> for &'c mut Decoder<'a, 'b, R> {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum SeqLike {
+    Seq,
+    Tuple,
+    Unit,
+}
+
 struct SeqDecoder<'a, 'b, 'c, R> {
     decoder: &'c mut Decoder<'a, 'b, R>,
     remaining: usize,
-    seq: bool,
+    seq_like: SeqLike,
 }
 
 impl<'a, 'b, 'c, 'd, R: Read> SeqAccess<'d> for SeqDecoder<'a, 'b, 'c, R> {
@@ -304,18 +315,22 @@ impl<'a, 'b, 'c, 'd, R: Read> SeqAccess<'d> for SeqDecoder<'a, 'b, 'c, R> {
         if self.remaining > 0 {
             self.remaining -= 1;
 
-            if self.seq {
-                self.decoder.begin_seq_elem()?;
-            } else {
-                self.decoder.begin_tuple_elem()?;
-            }
+            match self.seq_like {
+                SeqLike::Seq => self.decoder.begin_seq_elem()?,
+                SeqLike::Tuple => self.decoder.begin_tuple_elem()?,
+                SeqLike::Unit => bail!(
+                    Other,
+                    Some(self.decoder.coder_state()),
+                    "deserialize element from unit as seq-like",
+                ),
+            };
             let value = seed.deserialize(&mut *self.decoder)?;
 
             if self.remaining == 0 {
-                if self.seq {
-                    self.decoder.finish_seq()?;
-                } else {
-                    self.decoder.finish_tuple()?;
+                match self.seq_like {
+                    SeqLike::Seq => self.decoder.finish_seq()?,
+                    SeqLike::Tuple => self.decoder.finish_tuple()?,
+                    SeqLike::Unit => unreachable!(),
                 }
             }
 

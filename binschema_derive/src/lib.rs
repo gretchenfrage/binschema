@@ -80,6 +80,9 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
                 // normal tuple
                 let inner = unnamed.iter()
                     .map(field_schema)
+                    .map(|field_schema| quote! {
+                        (#field_schema)
+                    })
                     .collect::<Punctuated<_, Comma>>();
                 quote! {
                     tuple { #inner }
