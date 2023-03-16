@@ -54,7 +54,7 @@ impl KnownSchema for usize {
 
 impl KnownSchema for isize {
     fn schema() -> Schema {
-        schema!(u64)
+        schema!(i64)
     }
 }
 
@@ -72,13 +72,13 @@ impl KnownSchema for String {
 
 impl KnownSchema for () {
     fn schema() -> Schema {
-        schema!(())
+        schema!(unit)
     }
 }
 
 impl<T: KnownSchema> KnownSchema for Option<T> {
     fn schema() -> Schema {
-        schema!(?(%T::schema()))
+        schema!(option(%T::schema()))
     }
 }
 
@@ -86,7 +86,7 @@ macro_rules! seqs_known_schema {
     ($($c:ident,)*)=>{$(
         impl<T: KnownSchema> KnownSchema for $c<T> {
             fn schema() -> Schema {
-                schema!([_; %T::schema()])
+                schema!(seq(varlen)(%T::schema()))
             }
         }
     )*};
@@ -105,10 +105,10 @@ macro_rules! maps_known_schema {
     ($($c:ident,)*)=>{$(
         impl<K: KnownSchema, V: KnownSchema> KnownSchema for $c<K, V> {
             fn schema() -> Schema {
-                schema!([_; (
+                schema!(seq(varlen)(tuple {
                     (%K::schema()),
                     (%V::schema()),
-                )])
+                }))
             }
         }
     )*};
@@ -121,13 +121,13 @@ maps_known_schema!(
 
 impl<T: KnownSchema, const LEN: usize> KnownSchema for [T; LEN] {
     fn schema() -> Schema {
-        schema!([LEN; %T::schema()])
+        schema!(seq(LEN)(%T::schema()))
     }
 }
 
 impl<T: KnownSchema> KnownSchema for [T] {
     fn schema() -> Schema {
-        schema!([_; %T::schema()])
+        schema!(seq(varlen)(%T::schema()))
     }
 }
 
@@ -135,9 +135,9 @@ macro_rules! tuples_known_schema {
     (@inner $($t:ident),*)=>{
         impl<$($t: KnownSchema),*> KnownSchema for ($($t),*) {
             fn schema() -> Schema {
-                schema!(($(
+                schema!(tuple {$(
                     (%$t::schema()),
-                )*))
+                )*})
             }
         }
     };
@@ -152,7 +152,7 @@ tuples_known_schema!(A, B, C, D, E, F, G, H, I, J, K);
 
 impl<T: KnownSchema> KnownSchema for Range<T> {
     fn schema() -> Schema {
-        schema!({
+        schema!(struct {
             (begin: %T::schema()),
             (end: %T::schema()),
         })
@@ -161,7 +161,7 @@ impl<T: KnownSchema> KnownSchema for Range<T> {
 
 impl<T: KnownSchema> KnownSchema for RangeInclusive<T> {
     fn schema() -> Schema {
-        schema!({
+        schema!(struct {
             (begin: %T::schema()),
             (end: %T::schema()),
         })
@@ -173,7 +173,7 @@ impl<T: KnownSchema> KnownSchema for Bound<T> {
         schema!(enum {
             Included(%T::schema()),
             Excluded(%T::schema()),
-            Unbounded(()),
+            Unbounded(unit),
         })
     }
 }
@@ -208,38 +208,38 @@ impl KnownSchema for Schema {
     fn schema() -> Schema {
         schema!(enum {
             Scalar(enum {
-                U8(()),
-                U16(()),
-                U32(()),
-                U64(()),
-                U128(()),
-                I8(()),
-                I16(()),
-                I32(()),
-                I64(()),
-                I128(()),
-                F32(()),
-                F64(()),
-                Char(()),
-                Bool(()),
+                U8(unit),
+                U16(unit),
+                U32(unit),
+                U64(unit),
+                U128(unit),
+                I8(unit),
+                I16(unit),
+                I32(unit),
+                I64(unit),
+                I128(unit),
+                F32(unit),
+                F64(unit),
+                Char(unit),
+                Bool(unit),
             }),
-            Str(()),
-            Bytes(()),
-            Unit(()),
+            Str(unit),
+            Bytes(unit),
+            Unit(unit),
             Option(recurse(1)),
-            Seq({
-                (len: ?(u64)),
+            Seq(struct {
+                (len: option(u64)),
                 (inner: recurse(2)),
             }),
-            Tuple([_; recurse(2)]),
-            Struct([_; {
+            Tuple(seq(varlen)(recurse(2))),
+            Struct(seq(varlen)(struct {
                 (name: str),
                 (inner: recurse(3)),
-            }]),
-            Enum([_; {
+            })),
+            Enum(seq(varlen)(struct {
                 (name: str),
                 (inner: recurse(3)),
-            }]),
+            })),
             Recurse(u64),
         })
     }

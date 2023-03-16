@@ -406,7 +406,7 @@ impl<'a> CoderState<'a> {
         code_f64(f64),
         code_char(char),
         code_bool(bool),
-        code_unit(()),
+        code_unit(unit),
         code_str(str),
         code_bytes(bytes),
     );

@@ -159,52 +159,6 @@ impl<S: Into<String>> From<(S, Schema)> for EnumSchemaVariant {
     }
 }
 
-/// Syntax sugar for constructing `Schema`.
-///
-/// ```
-/// use binschema::*;
-///
-/// let _: Schema = schema!(u8);
-/// let _: Schema = schema!(u16);
-/// let _: Schema = schema!(u32);
-/// let _: Schema = schema!(u64);
-/// let _: Schema = schema!(u128);
-/// let _: Schema = schema!(i8);
-/// let _: Schema = schema!(i16);
-/// let _: Schema = schema!(i32);
-/// let _: Schema = schema!(i64);
-/// let _: Schema = schema!(i128);
-/// let _: Schema = schema!(f32);
-/// let _: Schema = schema!(f64);
-/// let _: Schema = schema!(char);
-/// let _: Schema = schema!(bool);
-/// let _: Schema = schema!(str);
-/// let _: Schema = schema!(bytes);
-/// let _: Schema = schema!(());
-/// let _: Schema = schema!(?(str));
-/// let _: Schema = schema!([7; str]);
-/// let _: Schema = schema!([_; str]);
-/// let _: Schema = schema!((
-///     (i32),
-///     (str),
-/// ));
-/// let _: Schema = schema!({
-///     (foo: i32),
-///     (bar: str),
-/// });
-/// let _: Schema = schema!(enum {
-///     Foo(i32),
-///     Bar(str),
-/// });
-/// let _binary_search_tree = schema!(enum {
-///     Branch({
-///         (left: recurse(2)),
-///         (right: recurse(2)),
-///     }),
-///     Leaf(i32),
-/// });
-/// let _: Schema = schema!(%Schema::Str);
-/// ```
 #[macro_export]
 macro_rules! schema {
     (u8)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::U8) };
@@ -223,12 +177,12 @@ macro_rules! schema {
     (bool)=>{ $crate::schema::Schema::Scalar($crate::schema::ScalarType::Bool) };
     (str)=>{ $crate::schema::Schema::Str };
     (bytes)=>{ $crate::schema::Schema::Bytes };
-    (())=>{ $crate::schema::Schema::Unit };
-    (?($($inner:tt)*))=>{ $crate::schema::Schema::Option(::std::boxed::Box::new($crate::schema!($($inner)*))) };
-    ([$len:expr; $($inner:tt)*])=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::Some($len), inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
-    ([_; $($inner:tt)*])=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::None, inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
-    (($(($($item:tt)*)),*$(,)?))=>{ $crate::schema::Schema::Tuple(::std::vec![$( $crate::schema!($($item)*), )*]) };
-    ({ $(($name:ident: $($field:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Struct(::std::vec![$( $crate::schema::StructSchemaField { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($field)*) }, )*]) };
+    (unit)=>{ $crate::schema::Schema::Unit };
+    (option($($inner:tt)*))=>{ $crate::schema::Schema::Option(::std::boxed::Box::new($crate::schema!($($inner)*))) };
+    (seq(varlen)($($inner:tt)*))=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::None, inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
+    (seq($len:expr)($($inner:tt)*))=>{ $crate::schema::Schema::Seq($crate::schema::SeqSchema { len: ::core::option::Option::Some($len), inner: ::std::boxed::Box::new($crate::schema!($($inner)*)) }) };
+    (tuple { $(($($item:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Tuple(::std::vec![$( $crate::schema!($($item)*), )*]) };
+    (struct { $(($name:ident: $($field:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Struct(::std::vec![$( $crate::schema::StructSchemaField { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($field)*) }, )*]) };
     (enum { $($name:ident($($variant:tt)*)),*$(,)? })=>{ $crate::schema::Schema::Enum(::std::vec![$( $crate::schema::EnumSchemaVariant { name: ::std::string::String::from(::core::stringify!($name)), inner: $crate::schema!($($variant)*) }, )*]) };
     (recurse($n:expr))=>{ $crate::schema::Schema::Recurse($n) };
     (%$schema:expr)=>{ $schema };

@@ -23,6 +23,8 @@ fn field_schema(field: &Field) -> TokenStream2 {
         .iter()
         .find(|attr| attr.path.is_ident("schema"))
     {
+        // attribute mode
+        // the only attribute we currently support is recurse
         let meta = attr.parse_args::<Meta>()
             .expect("attribute failed to parse");
         let meta =
@@ -40,6 +42,7 @@ fn field_schema(field: &Field) -> TokenStream2 {
             recurse(#n)
         }
     } else {
+        // not attributes
         let field_ty = &field.ty;
         quote! {
             %<#field_ty as ::binschema::KnownSchema>::schema()
@@ -50,6 +53,7 @@ fn field_schema(field: &Field) -> TokenStream2 {
 fn fields_schema(fields: &Fields) -> TokenStream2 {
     match fields {
         &Fields::Named(FieldsNamed { ref named, .. }) => {
+            // struct-like
             let inner = named.iter()
                 .map(|field| {
                     let field_name = field.ident.as_ref().unwrap();
@@ -60,28 +64,31 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
                 })
                 .collect::<Punctuated<_, Comma>>();
             quote! {
-                { #inner }
+                struct { #inner }
             }
         },
         Fields::Unnamed(FieldsUnnamed { ref unnamed, .. }) => {
             if unnamed.len() == 0 {
+                // 0-tuple... just treat it as unit!
                 quote! {
-                    ()
+                    unit
                 }
             } else if unnamed.len() == 1 {
+                // newtype (1-tuple)
                 field_schema(&unnamed[0])
             } else {
+                // normal tuple
                 let inner = unnamed.iter()
                     .map(field_schema)
                     .collect::<Punctuated<_, Comma>>();
                 quote! {
-                    ( #inner )
+                    tuple { #inner }
                 }
             }
         },
         &Fields::Unit => {
             quote! {
-                ()
+                unit
             }
         },
     }
