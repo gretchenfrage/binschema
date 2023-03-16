@@ -63,6 +63,7 @@ pub struct Test1 {
     e: Test1Struct0Tuple,
     f: Test1StructNewtype,
     g: Test1Struct2Tuple,
+    h: char,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KnownSchema)]
@@ -90,6 +91,7 @@ fn test_1() {
         e: Test1Struct0Tuple(),
         f: Test1StructNewtype(3.5),
         g: Test1Struct2Tuple(4.2, 2.6),
+        h: 'f',
     });
 }
 

@@ -96,6 +96,7 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
         encode_u32(u32) code_u32,
         encode_u64(u64) code_u64,
         encode_u128(u128) code_u128,
+        encode_char(char) code_char,
     );
 
     encode_var_len_sint!(
@@ -103,12 +104,6 @@ impl<'a, 'b, W: Write> Encoder<'a, 'b, W> {
         encode_i64(i64) code_i64,
         encode_i128(i128) code_i128,
     );
-
-    pub fn encode_char(&mut self, c: char) -> Result<()> {
-        self.state.code_char()?;
-        self.write(&(c as u32).to_le_bytes())?;
-        Ok(())
-    }
 
     pub fn encode_bool(&mut self, b: bool) -> Result<()> {
         self.state.code_bool()?;

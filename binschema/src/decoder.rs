@@ -80,7 +80,7 @@ macro_rules! decode_var_len_uint {
                         ),
                         n,
                     )))
-                .do_if_err(|| self.state.mark_broken())            
+                .do_if_err(|| self.state.mark_broken())
         }
     )*};
 }
@@ -151,7 +151,16 @@ impl<'a, 'b, R: Read> Decoder<'a, 'b, R> {
 
     pub fn decode_char(&mut self) -> Result<char> {
         self.state.code_char()?;
-        let n = u32::from_le_bytes(self.read([0; 4])?);
+        let n = read_var_len_uint(&mut self.read)
+            .map_err(Error::from)
+            .and_then(|n| u32::try_from(n)
+                .map_err(|_| error!(
+                    MalformedData,
+                    Some(self.coder_state()),
+                    "{} out of range for a char",
+                    n,
+                )))
+            .do_if_err(|| self.state.mark_broken())?;
         char::from_u32(n)
             .ok_or_else(|| error!(
                 MalformedData,
