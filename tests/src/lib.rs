@@ -15,13 +15,14 @@ fn round_trip_test<T>(val: T)
 where
     T: Debug + PartialEq + Serialize + for<'d> Deserialize<'d> + KnownSchema,
 {
-    println!("{:#?}", val);
-    println!("{:#?}", T::schema());
 
     // prep
-    let schema = T::schema();
+    let schema = T::schema(Default::default());
     let mut coder_alloc = CoderStateAlloc::new();
     let mut buf = Vec::new();
+
+    println!("{:#?}", val);
+    println!("{}", schema.pretty_fmt());
 
     // serialize
     let mut coder = CoderState::new(&schema, coder_alloc, None);
@@ -130,9 +131,7 @@ fn test_2() {
 pub enum BinaryTree {
     Branch {
         value: u32,
-        #[schema(recurse = 2)]
         left: Box<BinaryTree>,
-        #[schema(recurse = 2)]
         right: Box<BinaryTree>,
     },
     Leaf(u32),
@@ -153,5 +152,5 @@ fn binary_tree_test() {
 
 #[test]
 fn schema_schema_test() {
-    round_trip_test(Schema::schema());
+    round_trip_test(Schema::schema(Default::default()));
 }

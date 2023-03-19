@@ -45,7 +45,7 @@ fn field_schema(field: &Field) -> TokenStream2 {
         // not attributes
         let field_ty = &field.ty;
         quote! {
-            %<#field_ty as ::binschema::KnownSchema>::schema()
+            %<#field_ty as ::binschema::KnownSchema>::schema(stack)
         }
     }
 }
@@ -64,7 +64,12 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
                 })
                 .collect::<Punctuated<_, Comma>>();
             quote! {
-                struct { #inner }
+                %{
+                    let stack = stack.with_none_layer();
+                    ::binschema::schema!(
+                        struct { #inner }
+                    )
+                }
             }
         },
         Fields::Unnamed(FieldsUnnamed { ref unnamed, .. }) => {
@@ -85,8 +90,13 @@ fn fields_schema(fields: &Fields) -> TokenStream2 {
                     })
                     .collect::<Punctuated<_, Comma>>();
                 quote! {
-                    tuple { #inner }
+                %{
+                    let stack = stack.with_none_layer();
+                    ::binschema::schema!(
+                        tuple { #inner }
+                    )
                 }
+            }
             }
         },
         &Fields::Unit => {
@@ -123,7 +133,13 @@ pub fn derive_known_schema(input: TokenStream) -> TokenStream {
     
     quote! {
         impl ::binschema::KnownSchema for #name {
-            fn schema() -> ::binschema::Schema {
+            fn schema(
+                parent_stack: ::binschema::RecurseStack,
+            ) -> ::binschema::Schema {
+                if let Some(s) = parent_stack.parent_recurse::<Self>() {
+                    return s;
+                }
+                let stack = parent_stack.with_type_layer::<Self>();
                 ::binschema::schema!(#schema)
             }
         }

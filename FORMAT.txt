@@ -111,69 +111,69 @@ the struct.
 Schemas themselves are values which can be encoded. Schemas are thus
 encoded with the following schema, the "meta-schema":
 
-- enum
-  variant 0 (name = "Scalar"):
-    - enum
-      variant 0 (name = "U8"):
-        - unit
-      variant 1 (name = "U16"):
-        - unit
-      variant 2 (name = "U32"):
-        - unit
-      variant 3 (name = "U64"):
-        - unit
-      variant 4 (name = "U128"):
-        - unit
-      variant 5 (name = "I8"):
-        - unit
-      variant 6 (name = "I16"):
-        - unit
-      variant 7 (name = "I32"):
-        - unit
-      variant 8 (name = "I64"):
-        - unit
-      variant 9 (name = "I128"):
-        - unit
-      variant 10 (name = "F32"):
-        - unit
-      variant 11 (name = "F64"):
-        - unit
-      variant 12 (name = "Char"):
-        - unit
-      variant 13 (name = "Bool"):
-        - unit
-  variant 1 (name = "Str"):
-    - unit
-  variant 2 (name = "Bytes"):
-    - unit
-  variant 3 (name = "Unit"):
-    - unit
-  variant 4 (name = "Option"):
-    - recurse (level = 1)
-  variant 5 (name = "Seq"):
-    - struct
-      field 0 (name = "len"):
-        - option:
-            - u64
-      field 1 (name = "inner"):
-        - recurse (level = 2)
-  variant 6 (name = "Tuple"):
-    - seq (variable length):
-        - recurse (level = 2)
-  variant 7 (name = "Struct"):
-    - seq (variable length):
-        - struct
-          field 0 (name = "name"):
-            - str
-          field 1 (name = "inner"):
-            - recurse (level = 3)
-  variant 8 (name = "Enum"):
-    - seq (variable length):
-        - struct
-          field 0 (name = "name")
-            - str
-          field 1 (name = "inner"):
-            - recurse (level = 3)
+- enum <--------------------------\-\-\-\-\
+  variant 0 (name = "Scalar"):    | | | | |
+    - enum                        | | | | |
+      variant 0 (name = "U8"):    | | | | |
+        - unit                    | | | | |
+      variant 1 (name = "U16"):   | | | | |
+        - unit                    | | | | |
+      variant 2 (name = "U32"):   | | | | |
+        - unit                    | | | | |
+      variant 3 (name = "U64"):   | | | | |
+        - unit                    | | | | |
+      variant 4 (name = "U128"):  | | | | |
+        - unit                    | | | | |
+      variant 5 (name = "I8"):    | | | | |
+        - unit                    | | | | |
+      variant 6 (name = "I16"):   | | | | |
+        - unit                    | | | | |
+      variant 7 (name = "I32"):   | | | | |
+        - unit                    | | | | |
+      variant 8 (name = "I64"):   | | | | |
+        - unit                    | | | | |
+      variant 9 (name = "I128"):  | | | | |
+        - unit                    | | | | |
+      variant 10 (name = "F32"):  | | | | |
+        - unit                    | | | | |
+      variant 11 (name = "F64"):  | | | | |
+        - unit                    | | | | |
+      variant 12 (name = "Char"): | | | | |
+        - unit                    | | | | |
+      variant 13 (name = "Bool"): | | | | |
+        - unit                    | | | | |
+  variant 1 (name = "Str"):       | | | | |
+    - unit                        | | | | |
+  variant 2 (name = "Bytes"):     | | | | |
+    - unit                        | | | | |
+  variant 3 (name = "Unit"):      | | | | |
+    - unit                        | | | | |
+  variant 4 (name = "Option"):    | | | | |
+    - recurse (level = 1) --------/ | | | |
+  variant 5 (name = "Seq"):         | | | |
+    - struct                        | | | |
+      field 0 (name = "len"):       | | | |
+        - option:                   | | | |
+            - u64                   | | | |
+      field 1 (name = "inner"):     | | | |
+        - recurse (level = 2) ------/ | | |
+  variant 6 (name = "Tuple"):         | | |
+    - seq (variable length):          | | |
+        - recurse (level = 2) --------/ | |
+  variant 7 (name = "Struct"):          | |
+    - seq (variable length):            | |
+        - struct                        | |
+          field 0 (name = "name"):      | |
+            - str                       | |
+          field 1 (name = "inner"):     | |
+            - recurse (level = 3) ------/ |
+  variant 8 (name = "Enum"):              |
+    - seq (variable length):              |
+        - struct                          |
+          field 0 (name = "name"):        |
+            - str                         |
+          field 1 (name = "inner"):       |
+            - recurse (level = 3) --------/
   variant 9 (name = "Recurse"):
     - u64
 

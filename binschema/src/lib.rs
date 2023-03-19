@@ -44,18 +44,16 @@
 
 
 pub mod error;
-pub mod schema;
 pub mod value;
 
-mod do_if_err;
+mod schema;
 mod known_schema;
+mod do_if_err;
 mod var_len;
 mod coder;
 mod encoder;
 mod decoder;
 mod serde;
-
-pub use crate::schema::Schema;
 
 pub use crate::{
     coder::{
@@ -64,7 +62,17 @@ pub use crate::{
     },
     encoder::Encoder,
     decoder::Decoder,
-    known_schema::KnownSchema,
+    known_schema::{
+        KnownSchema,
+        RecurseStack,
+    },
+    schema::{
+        Schema,
+        ScalarType,
+        SeqSchema,
+        StructSchemaField,
+        EnumSchemaVariant,
+    },
 };
 
 pub use binschema_derive::KnownSchema;
